@@ -32,8 +32,8 @@ android {
 }
 
 dependencies {
-    // wasi-emscripten-host with Chicory binding
-    implementation("at.released.weh:bindings-chicory-wasip1-jvm:0.7.0-SNAPSHOT")
+    // wasi-emscripten-host with Chicory binding (from Maven Central)
+    implementation("at.released.weh:bindings-chicory-wasip1-jvm:0.6.0")
     implementation("com.dylibso.chicory:runtime:1.5.1")
 
     // Android
