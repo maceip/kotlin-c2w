@@ -12,15 +12,23 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 /**
  * High-performance c2w Android app using WAMR native runtime.
  *
  * Architecture:
- *   UI (Kotlin) ←→ JNI ←→ WAMR (C/C++) ←→ Bochs WASM ←→ Alpine Linux
+ *   UI (Kotlin) <-> JNI <-> WAMR (C/C++) <-> Bochs WASM <-> Alpine Linux
  *
- * This replaces Chicory (Java WASM interpreter) with WAMR (native),
- * providing 10-15x performance improvement.
+ * Features:
+ *   - WAMR native runtime (10-15x faster than Chicory)
+ *   - AOT compilation (pre-compiled ARM64 code)
+ *   - Checkpoint/snapshot restore for instant boot
+ *
+ * Special Commands:
+ *   !save     - Save checkpoint (snapshot current VM state)
+ *   !restore  - Delete checkpoint and reboot fresh
+ *   !info     - Show checkpoint info
  */
 class MainActivity : AppCompatActivity() {
 
@@ -49,8 +57,22 @@ class MainActivity : AppCompatActivity() {
         }
 
         appendOutput("=== Alpine Linux on WASM (WAMR Edition) ===\n")
-        appendOutput("High-performance native WASM runtime\n")
-        appendOutput("Runtime: ${WamrRuntime.version}\n\n")
+        appendOutput("Runtime: ${WamrRuntime.version}\n")
+        appendOutput("Commands: !save !restore !info\n\n")
+
+        // Set checkpoint path
+        val checkpointFile = File(filesDir, "vm_checkpoint.snap")
+        WamrRuntime.setCheckpointPath(checkpointFile.absolutePath)
+
+        // Show checkpoint status
+        if (WamrRuntime.hasCheckpoint()) {
+            val info = WamrRuntime.getCheckpointInfo() ?: "Checkpoint found"
+            appendOutput("$info\n")
+            appendOutput("Will restore from checkpoint (instant boot)\n\n")
+        } else {
+            appendOutput("No checkpoint - will do full boot\n")
+            appendOutput("Use !save after boot to create checkpoint\n\n")
+        }
 
         // Auto-start VM
         lifecycleScope.launch {
@@ -59,10 +81,50 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun sendCommand() {
-        val cmd = commandInput.text.toString()
-        if (cmd.isNotEmpty() && WamrRuntime.isRunning) {
+        val cmd = commandInput.text.toString().trim()
+        if (cmd.isEmpty()) return
+
+        commandInput.text.clear()
+
+        // Handle special commands
+        when (cmd.lowercase()) {
+            "!save" -> {
+                appendOutput("[Host] Saving checkpoint...\n")
+                lifecycleScope.launch(Dispatchers.IO) {
+                    val success = WamrRuntime.saveCheckpoint()
+                    withContext(Dispatchers.Main) {
+                        if (success) {
+                            val info = WamrRuntime.getCheckpointInfo() ?: "Saved"
+                            appendOutput("[Host] $info\n")
+                            appendOutput("[Host] Next launch will restore instantly\n")
+                        } else {
+                            appendOutput("[Host] Failed to save checkpoint\n")
+                        }
+                    }
+                }
+                return
+            }
+            "!restore" -> {
+                appendOutput("[Host] Deleting checkpoint...\n")
+                WamrRuntime.deleteCheckpoint()
+                appendOutput("[Host] Checkpoint deleted\n")
+                appendOutput("[Host] Restart app for fresh boot\n")
+                return
+            }
+            "!info" -> {
+                val info = WamrRuntime.getCheckpointInfo()
+                if (info != null) {
+                    appendOutput("[Host] $info\n")
+                } else {
+                    appendOutput("[Host] No checkpoint exists\n")
+                }
+                return
+            }
+        }
+
+        // Regular command - send to VM
+        if (WamrRuntime.isRunning) {
             WamrRuntime.sendInput(cmd + "\n")
-            commandInput.text.clear()
             appendOutput("> $cmd\n")
         }
     }
@@ -71,7 +133,7 @@ class MainActivity : AppCompatActivity() {
         try {
             // Initialize WAMR
             withContext(Dispatchers.Main) {
-                appendOutput("Initializing WAMR runtime...\n")
+                appendOutput("Initializing WAMR...\n")
             }
 
             if (!WamrRuntime.initialize()) {
@@ -81,32 +143,39 @@ class MainActivity : AppCompatActivity() {
                 return@withContext
             }
 
-            // Load WASM from assets
+            // Load AOT (pre-compiled) or WASM from assets
+            val useAot = true
+            val assetName = if (useAot) "alpine.aot" else "alpine.wasm"
+
             withContext(Dispatchers.Main) {
-                appendOutput("Loading alpine.wasm from assets...\n")
+                appendOutput("Loading $assetName...\n")
             }
 
-            val wasmBytes = assets.open("alpine.wasm").use { it.readBytes() }
+            val wasmBytes = assets.open(assetName).use { it.readBytes() }
 
             withContext(Dispatchers.Main) {
                 appendOutput("Size: ${wasmBytes.size / 1024 / 1024} MB\n")
-                appendOutput("Parsing WASM module...\n")
             }
 
             if (!WamrRuntime.loadModule(wasmBytes)) {
                 withContext(Dispatchers.Main) {
-                    appendOutput("ERROR: Failed to load WASM module\n")
+                    appendOutput("ERROR: Failed to load module\n")
                 }
                 return@withContext
             }
 
+            val hasCheckpoint = WamrRuntime.hasCheckpoint()
+
             withContext(Dispatchers.Main) {
-                appendOutput("Starting VM...\n")
-                appendOutput("(Bochs x86 emulator - now with WAMR!)\n\n")
+                if (hasCheckpoint) {
+                    appendOutput("Restoring from checkpoint...\n")
+                } else {
+                    appendOutput("Starting fresh (Bochs x86 boot)...\n")
+                }
             }
 
-            // Start VM with output callback
-            val started = WamrRuntime.start { text ->
+            // Start VM with checkpoint restore support
+            val started = WamrRuntime.startWithRestore { text ->
                 runOnUiThread {
                     appendOutput(text)
                 }

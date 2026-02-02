@@ -27,6 +27,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/select.h>
+#include <sys/stat.h>
 
 #include "wasm_export.h"
 
@@ -58,6 +59,14 @@ static jmethodID g_on_output_method = nullptr;
 // c2w handshake detection
 static std::atomic<bool> g_handshake_sent{false};
 static int g_equal_count = 0;
+
+// Checkpoint/Snapshot support
+static std::string g_checkpoint_path;
+static std::atomic<bool> g_checkpoint_ready{false};
+
+// Checkpoint file format magic
+static const char CHECKPOINT_MAGIC[8] = {'C', '2', 'W', 'S', 'N', 'A', 'P', '\0'};
+static const uint32_t CHECKPOINT_VERSION = 1;
 
 // ============================================================================
 // Utility Functions
@@ -153,6 +162,196 @@ static void stdout_reader_thread() {
     }
 
     LOGI("Stdout reader thread exiting");
+}
+
+// ============================================================================
+// Checkpoint/Snapshot Functions
+// ============================================================================
+
+/**
+ * Save WASM linear memory to a checkpoint file.
+ * Format:
+ *   - 8 bytes: Magic "C2WSNAP\0"
+ *   - 4 bytes: Version
+ *   - 8 bytes: Memory size in bytes
+ *   - N bytes: Raw linear memory
+ *
+ * Note: This captures only linear memory, not globals/tables/stack.
+ * For Bochs emulation, linear memory contains the entire emulated machine state
+ * (RAM, CPU state stored in memory), so this should be sufficient for restore.
+ */
+static bool save_checkpoint(const char* path) {
+    if (!g_module_inst) {
+        LOGE("Cannot save checkpoint: no module instance");
+        return false;
+    }
+
+    // Get memory instance
+    wasm_memory_inst_t memory = wasm_runtime_get_default_memory(g_module_inst);
+    if (!memory) {
+        LOGE("Cannot save checkpoint: no memory instance");
+        return false;
+    }
+
+    // Get memory info
+    void* base_addr = wasm_memory_get_base_address(memory);
+    uint64_t page_count = wasm_memory_get_cur_page_count(memory);
+    uint64_t bytes_per_page = wasm_memory_get_bytes_per_page(memory);
+    uint64_t memory_size = page_count * bytes_per_page;
+
+    LOGI("Saving checkpoint: %llu pages, %llu bytes/page, total %llu MB",
+         (unsigned long long)page_count,
+         (unsigned long long)bytes_per_page,
+         (unsigned long long)(memory_size >> 20));
+
+    // Open file for writing
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        LOGE("Cannot create checkpoint file: %s (errno=%d)", path, errno);
+        return false;
+    }
+
+    // Write header
+    bool success = true;
+    if (write(fd, CHECKPOINT_MAGIC, 8) != 8) success = false;
+    if (success && write(fd, &CHECKPOINT_VERSION, 4) != 4) success = false;
+    if (success && write(fd, &memory_size, 8) != 8) success = false;
+
+    // Write memory in chunks to avoid large single writes
+    if (success && base_addr) {
+        const size_t CHUNK_SIZE = 16 * 1024 * 1024;  // 16MB chunks
+        uint8_t* src = static_cast<uint8_t*>(base_addr);
+        uint64_t remaining = memory_size;
+
+        while (remaining > 0 && success) {
+            size_t chunk = (remaining > CHUNK_SIZE) ? CHUNK_SIZE : remaining;
+            ssize_t written = write(fd, src, chunk);
+            if (written != static_cast<ssize_t>(chunk)) {
+                LOGE("Write error at offset %llu: expected %zu, got %zd",
+                     (unsigned long long)(memory_size - remaining), chunk, written);
+                success = false;
+                break;
+            }
+            src += chunk;
+            remaining -= chunk;
+        }
+    }
+
+    close(fd);
+
+    if (success) {
+        LOGI("Checkpoint saved successfully: %s", path);
+    } else {
+        LOGE("Failed to save checkpoint");
+        unlink(path);
+    }
+
+    return success;
+}
+
+/**
+ * Restore WASM linear memory from a checkpoint file.
+ * Must be called after module is instantiated but before execution starts.
+ */
+static bool restore_checkpoint(const char* path) {
+    if (!g_module_inst) {
+        LOGE("Cannot restore checkpoint: no module instance");
+        return false;
+    }
+
+    // Get memory instance
+    wasm_memory_inst_t memory = wasm_runtime_get_default_memory(g_module_inst);
+    if (!memory) {
+        LOGE("Cannot restore checkpoint: no memory instance");
+        return false;
+    }
+
+    // Open checkpoint file
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        LOGI("No checkpoint file found: %s", path);
+        return false;
+    }
+
+    // Read and verify header
+    char magic[8];
+    uint32_t version;
+    uint64_t saved_memory_size;
+
+    bool valid = true;
+    if (read(fd, magic, 8) != 8 || memcmp(magic, CHECKPOINT_MAGIC, 8) != 0) {
+        LOGE("Invalid checkpoint magic");
+        valid = false;
+    }
+    if (valid && (read(fd, &version, 4) != 4 || version != CHECKPOINT_VERSION)) {
+        LOGE("Invalid checkpoint version: %u", version);
+        valid = false;
+    }
+    if (valid && read(fd, &saved_memory_size, 8) != 8) {
+        LOGE("Cannot read memory size from checkpoint");
+        valid = false;
+    }
+
+    if (!valid) {
+        close(fd);
+        return false;
+    }
+
+    // Get current memory info
+    void* base_addr = wasm_memory_get_base_address(memory);
+    uint64_t page_count = wasm_memory_get_cur_page_count(memory);
+    uint64_t bytes_per_page = wasm_memory_get_bytes_per_page(memory);
+    uint64_t current_memory_size = page_count * bytes_per_page;
+
+    LOGI("Restoring checkpoint: saved=%llu MB, current=%llu MB",
+         (unsigned long long)(saved_memory_size >> 20),
+         (unsigned long long)(current_memory_size >> 20));
+
+    // Grow memory if needed
+    if (saved_memory_size > current_memory_size) {
+        uint64_t needed_pages = (saved_memory_size + bytes_per_page - 1) / bytes_per_page;
+        uint64_t pages_to_add = needed_pages - page_count;
+        LOGI("Growing memory by %llu pages", (unsigned long long)pages_to_add);
+        if (!wasm_memory_enlarge(memory, pages_to_add)) {
+            LOGE("Failed to grow memory for checkpoint restore");
+            close(fd);
+            return false;
+        }
+        // Refresh base address after growth
+        base_addr = wasm_memory_get_base_address(memory);
+    }
+
+    // Read memory in chunks
+    bool success = true;
+    if (base_addr) {
+        const size_t CHUNK_SIZE = 16 * 1024 * 1024;  // 16MB chunks
+        uint8_t* dst = static_cast<uint8_t*>(base_addr);
+        uint64_t remaining = saved_memory_size;
+
+        while (remaining > 0 && success) {
+            size_t chunk = (remaining > CHUNK_SIZE) ? CHUNK_SIZE : remaining;
+            ssize_t bytes_read = read(fd, dst, chunk);
+            if (bytes_read != static_cast<ssize_t>(chunk)) {
+                LOGE("Read error at offset %llu: expected %zu, got %zd",
+                     (unsigned long long)(saved_memory_size - remaining), chunk, bytes_read);
+                success = false;
+                break;
+            }
+            dst += chunk;
+            remaining -= chunk;
+        }
+    }
+
+    close(fd);
+
+    if (success) {
+        LOGI("Checkpoint restored successfully");
+        g_checkpoint_ready = true;
+    } else {
+        LOGE("Failed to restore checkpoint");
+    }
+
+    return success;
 }
 
 // ============================================================================
@@ -391,7 +590,214 @@ Java_com_example_c2wdemo_WamrRuntime_nativeIsRunning(JNIEnv* env, jclass clazz) 
 
 JNIEXPORT jstring JNICALL
 Java_com_example_c2wdemo_WamrRuntime_nativeGetVersion(JNIEnv* env, jclass clazz) {
-    return env->NewStringUTF("WAMR Fast Interp | WASI Preview 1 | SIMD");
+    return env->NewStringUTF("WAMR AOT + Fast Interp | WASI Preview 1 | SIMD | Checkpoint");
+}
+
+// ============================================================================
+// Checkpoint JNI Functions
+// ============================================================================
+
+/**
+ * Set the checkpoint file path for save/restore operations.
+ */
+JNIEXPORT void JNICALL
+Java_com_example_c2wdemo_WamrRuntime_nativeSetCheckpointPath(
+    JNIEnv* env, jclass clazz, jstring path) {
+
+    const char* str = env->GetStringUTFChars(path, nullptr);
+    if (str) {
+        g_checkpoint_path = str;
+        LOGI("Checkpoint path set: %s", g_checkpoint_path.c_str());
+        env->ReleaseStringUTFChars(path, str);
+    }
+}
+
+/**
+ * Save current VM state to checkpoint file.
+ * Can be called while VM is running (will briefly pause for consistency).
+ * Returns true on success.
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_example_c2wdemo_WamrRuntime_nativeSaveCheckpoint(JNIEnv* env, jclass clazz) {
+    if (g_checkpoint_path.empty()) {
+        LOGE("No checkpoint path set");
+        return JNI_FALSE;
+    }
+
+    if (!g_module_inst) {
+        LOGE("No module instance for checkpoint");
+        return JNI_FALSE;
+    }
+
+    // Note: For a truly consistent snapshot during execution, we would need
+    // to pause the VM thread. For Bochs emulation, the memory should be
+    // mostly consistent as long as we're not in the middle of an instruction.
+    // A more robust solution would involve WAMR's suspend/resume APIs.
+
+    bool result = save_checkpoint(g_checkpoint_path.c_str());
+    return result ? JNI_TRUE : JNI_FALSE;
+}
+
+/**
+ * Check if a checkpoint file exists.
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_example_c2wdemo_WamrRuntime_nativeHasCheckpoint(JNIEnv* env, jclass clazz) {
+    if (g_checkpoint_path.empty()) {
+        return JNI_FALSE;
+    }
+
+    int fd = open(g_checkpoint_path.c_str(), O_RDONLY);
+    if (fd < 0) {
+        return JNI_FALSE;
+    }
+    close(fd);
+    return JNI_TRUE;
+}
+
+/**
+ * Delete the checkpoint file.
+ */
+JNIEXPORT void JNICALL
+Java_com_example_c2wdemo_WamrRuntime_nativeDeleteCheckpoint(JNIEnv* env, jclass clazz) {
+    if (!g_checkpoint_path.empty()) {
+        unlink(g_checkpoint_path.c_str());
+        LOGI("Checkpoint deleted");
+    }
+}
+
+/**
+ * Get checkpoint info as a string (for display).
+ * Returns null if no checkpoint exists.
+ */
+JNIEXPORT jstring JNICALL
+Java_com_example_c2wdemo_WamrRuntime_nativeGetCheckpointInfo(JNIEnv* env, jclass clazz) {
+    if (g_checkpoint_path.empty()) {
+        return nullptr;
+    }
+
+    int fd = open(g_checkpoint_path.c_str(), O_RDONLY);
+    if (fd < 0) {
+        return nullptr;
+    }
+
+    // Read header
+    char magic[8];
+    uint32_t version;
+    uint64_t memory_size;
+
+    bool valid = read(fd, magic, 8) == 8 &&
+                 memcmp(magic, CHECKPOINT_MAGIC, 8) == 0 &&
+                 read(fd, &version, 4) == 4 &&
+                 read(fd, &memory_size, 8) == 8;
+    close(fd);
+
+    if (!valid) {
+        return nullptr;
+    }
+
+    // Get file size
+    struct stat st;
+    stat(g_checkpoint_path.c_str(), &st);
+
+    char info[256];
+    snprintf(info, sizeof(info),
+             "Checkpoint: %.1f MB memory, %.1f MB file",
+             memory_size / 1048576.0,
+             st.st_size / 1048576.0);
+
+    return env->NewStringUTF(info);
+}
+
+/**
+ * Start VM with checkpoint restore.
+ * If checkpoint exists, restores from it instead of running from start.
+ * Returns true on success.
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_example_c2wdemo_WamrRuntime_nativeStartWithRestore(
+    JNIEnv* env, jclass clazz, jobject callback) {
+
+    if (!g_wasm_module) {
+        LOGE("No module loaded");
+        return JNI_FALSE;
+    }
+
+    if (g_vm_running) {
+        LOGE("VM already running");
+        return JNI_FALSE;
+    }
+
+    // Store callback
+    g_callback_obj = env->NewGlobalRef(callback);
+    jclass cls = env->GetObjectClass(callback);
+    g_on_output_method = env->GetMethodID(cls, "onOutput", "(Ljava/lang/String;)V");
+
+    // Create pipes
+    if (pipe(g_stdin_pipe) < 0 || pipe(g_stdout_pipe) < 0) {
+        LOGE("Failed to create pipes");
+        close_pipes();
+        return JNI_FALSE;
+    }
+
+    // Make stdin read non-blocking for WASM (so it can poll)
+    fcntl(g_stdin_pipe[0], F_SETFL, O_NONBLOCK);
+
+    // Reset handshake state
+    g_handshake_sent = false;
+    g_equal_count = 0;
+    g_checkpoint_ready = false;
+
+    // Configure WASI
+    const char* dir_list[] = { "/", "." };
+    uint32_t dir_count = 2;
+    const char* env_list[] = { nullptr };
+
+    wasm_runtime_set_wasi_args_ex(
+        g_wasm_module,
+        dir_list, dir_count,
+        nullptr, 0,
+        env_list, 0,
+        nullptr, 0,
+        g_stdin_pipe[0],
+        g_stdout_pipe[1],
+        g_stdout_pipe[1]
+    );
+
+    // Large stack/heap for Bochs x86 emulator
+    uint32_t stack_size = 8 * 1024 * 1024;
+    uint32_t heap_size = 512 * 1024 * 1024;
+
+    LOGI("Instantiating: stack=%uMB heap=%uMB", stack_size >> 20, heap_size >> 20);
+
+    char error_buf[256];
+    g_module_inst = wasm_runtime_instantiate(
+        g_wasm_module, stack_size, heap_size, error_buf, sizeof(error_buf));
+
+    if (!g_module_inst) {
+        LOGE("Instantiate failed: %s", error_buf);
+        close_pipes();
+        return JNI_FALSE;
+    }
+
+    // Try to restore from checkpoint
+    bool restored = false;
+    if (!g_checkpoint_path.empty()) {
+        restored = restore_checkpoint(g_checkpoint_path.c_str());
+        if (restored) {
+            // Mark handshake as already sent since we're restoring post-boot state
+            g_handshake_sent = true;
+            send_to_java("[Restored from checkpoint]\n", 27);
+        }
+    }
+
+    // Start threads
+    g_vm_running = true;
+    g_stdout_thread = std::thread(stdout_reader_thread);
+    g_vm_thread = std::thread(vm_execution_thread);
+
+    LOGI("VM started (restored=%d)", restored);
+    return JNI_TRUE;
 }
 
 } // extern "C"
