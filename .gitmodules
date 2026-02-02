@@ -1,0 +1,3 @@
+[submodule "wasi-emscripten-host"]
+	path = wasi-emscripten-host
+	url = https://github.com/illarionov/wasi-emscripten-host.git

@@ -14,6 +14,5 @@ Thumbs.db
 # WASM binaries (too large)
 *.wasm
 
-# Submodules (manage separately)
+# Large directories (not submodules)
 container2wasm/
-wasi-emscripten-host/
