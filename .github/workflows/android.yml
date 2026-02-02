@@ -32,7 +32,7 @@ jobs:
     - name: Build wasi-emscripten-host
       run: |
         cd wasi-emscripten-host
-        ./gradlew publishToMavenLocal -x test
+        ./gradlew publishToMavenLocal
 
     - name: Grant execute permission for gradlew
       run: chmod +x android-app/gradlew
