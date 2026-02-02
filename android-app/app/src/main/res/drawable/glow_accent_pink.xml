@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Pink glowing accent light - Invader Zim style -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Outer glow -->
+    <item>
+        <shape android:shape="oval">
+            <gradient
+                android:type="radial"
+                android:gradientRadius="12dp"
+                android:centerColor="#80FF69B4"
+                android:endColor="#00FF69B4" />
+            <size android:width="24dp" android:height="24dp" />
+        </shape>
+    </item>
+
+    <!-- Inner bright core -->
+    <item
+        android:left="6dp"
+        android:top="6dp"
+        android:right="6dp"
+        android:bottom="6dp">
+        <shape android:shape="oval">
+            <gradient
+                android:type="radial"
+                android:gradientRadius="6dp"
+                android:startColor="#FFFFFF"
+                android:centerColor="#FF69B4"
+                android:endColor="#FF1493" />
+            <size android:width="12dp" android:height="12dp" />
+        </shape>
+    </item>
+
+</layer-list>

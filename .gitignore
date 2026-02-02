@@ -1,0 +1,19 @@
+# Build outputs
+build/
+.gradle/
+*.apk
+
+# IDE
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# WASM binaries (too large)
+*.wasm
+
+# Submodules (manage separately)
+container2wasm/
+wasi-emscripten-host/

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Invader Zim themed terminal -->
+    <style name="Theme.C2WDemo" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <!-- Purple/magenta Zim colors -->
+        <item name="colorPrimary">#9B4DCA</item>
+        <item name="colorPrimaryVariant">#5B1D7E</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+
+        <!-- Accent colors -->
+        <item name="colorSecondary">#FF69B4</item>
+        <item name="colorSecondaryVariant">#FF1493</item>
+        <item name="colorOnSecondary">#000000</item>
+
+        <!-- Dark background -->
+        <item name="android:statusBarColor">#0D0D1A</item>
+        <item name="android:navigationBarColor">#0D0D1A</item>
+        <item name="android:windowBackground">#0D0D1A</item>
+
+        <!-- Prevent keyboard from resizing weirdly -->
+        <item name="android:windowSoftInputMode">adjustResize</item>
+    </style>
+
+    <!-- Colors reference -->
+    <color name="zim_purple_dark">#5B1D7E</color>
+    <color name="zim_purple_mid">#7B2D9E</color>
+    <color name="zim_purple_light">#9B4DCA</color>
+    <color name="zim_purple_highlight">#C77DFF</color>
+    <color name="zim_pink_glow">#FF69B4</color>
+    <color name="zim_pink_bright">#FF1493</color>
+    <color name="zim_cyan_glow">#00FFFF</color>
+    <color name="zim_green_terminal">#00FF88</color>
+    <color name="zim_background">#0D0D1A</color>
+    <color name="zim_screen">#0A0A14</color>
+</resources>
