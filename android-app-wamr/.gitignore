@@ -1,0 +1,18 @@
+# Build outputs
+build/
+.cxx/
+.gradle/
+*.apk
+
+# IDE
+.idea/
+*.iml
+
+# Local config
+local.properties
+
+# WASM binaries (too large for git)
+app/src/main/assets/*.wasm
+
+# Docker build output
+build-output/

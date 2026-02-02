@@ -1,3 +1,6 @@
 [submodule "wasi-emscripten-host"]
 	path = wasi-emscripten-host
 	url = https://github.com/illarionov/wasi-emscripten-host.git
+[submodule "wamr-integration/wamr"]
+	path = wamr-integration/wamr
+	url = https://github.com/bytecodealliance/wasm-micro-runtime.git
