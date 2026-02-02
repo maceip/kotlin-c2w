@@ -1,0 +1,40 @@
+name: Android CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: gradle
+
+    - name: Build wasi-emscripten-host
+      run: |
+        cd wasi-emscripten-host
+        ./gradlew publishToMavenLocal -x test
+
+    - name: Grant execute permission for gradlew
+      run: chmod +x android-app/gradlew
+
+    - name: Build Android APK
+      run: |
+        cd android-app
+        ./gradlew assembleDebug
+
+    - name: Upload APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: app-debug
+        path: android-app/app/build/outputs/apk/debug/app-debug.apk
