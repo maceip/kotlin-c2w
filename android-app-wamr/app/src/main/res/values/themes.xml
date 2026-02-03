@@ -17,8 +17,8 @@
         <item name="android:navigationBarColor">#0D0D1A</item>
         <item name="android:windowBackground">#0D0D1A</item>
 
-        <!-- Prevent keyboard from resizing weirdly -->
-        <item name="android:windowSoftInputMode">adjustResize</item>
+        <!-- IME handled via WindowInsetsAnimation (edge-to-edge) -->
+        <item name="android:windowSoftInputMode">adjustNothing</item>
     </style>
 
     <!-- Colors reference -->

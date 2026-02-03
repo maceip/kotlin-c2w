@@ -88,4 +88,5 @@ target_compile_options(c2w_wamr PRIVATE
 
 target_link_options(c2w_wamr PRIVATE
     -Wl,--gc-sections
+    -Wl,-z,max-page-size=16384
 )
