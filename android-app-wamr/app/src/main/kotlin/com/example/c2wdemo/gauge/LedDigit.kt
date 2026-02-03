@@ -8,6 +8,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
@@ -97,6 +98,18 @@ private fun DrawScope.drawSegmentH(x: Float, y: Float, len: Float, thick: Float,
 
 private fun DrawScope.drawSegmentV(x: Float, y: Float, len: Float, thick: Float, color: Color) {
     drawRect(color = color, topLeft = Offset(x, y), size = Size(thick, len))
+}
+
+@Preview(name = "Digit 8", widthDp = 20, heightDp = 30, showBackground = true, backgroundColor = 0xFF0A0A14)
+@Composable
+private fun PreviewLedDigit() {
+    LedDigit(char = '8', onColor = Color(0xFF00FF88), offColor = Color(0xFF0A1A0A))
+}
+
+@Preview(name = "Number 42", widthDp = 50, heightDp = 30, showBackground = true, backgroundColor = 0xFF0A0A14)
+@Composable
+private fun PreviewLedNumber() {
+    LedNumber(text = "42", onColor = Color(0xFF00FFFF), offColor = Color(0xFF0A1A0A))
 }
 
 /**

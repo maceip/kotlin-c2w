@@ -15,6 +15,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -138,6 +141,27 @@ private fun LedLabel(text: String) {
             letterSpacing = androidx.compose.ui.unit.TextUnit(2f, androidx.compose.ui.unit.TextUnitType.Sp),
         ),
     )
+}
+
+@Preview(name = "Idle", widthDp = 52, heightDp = 300, showBackground = true, backgroundColor = 0xFF0D0D1A)
+@Composable
+private fun PreviewGaugeIdle() {
+    val state = remember { mutableStateOf(GaugeData(ramPercent = 0.35f, fps = 0, latencyMs = 0)) }
+    ZimStatusGauge(data = state)
+}
+
+@Preview(name = "Active", widthDp = 52, heightDp = 300, showBackground = true, backgroundColor = 0xFF0D0D1A)
+@Composable
+private fun PreviewGaugeActive() {
+    val state = remember { mutableStateOf(GaugeData(ramPercent = 0.62f, fps = 30, latencyMs = 42)) }
+    ZimStatusGauge(data = state)
+}
+
+@Preview(name = "High Load", widthDp = 52, heightDp = 300, showBackground = true, backgroundColor = 0xFF0D0D1A)
+@Composable
+private fun PreviewGaugeHighLoad() {
+    val state = remember { mutableStateOf(GaugeData(ramPercent = 0.92f, fps = 60, latencyMs = 850)) }
+    ZimStatusGauge(data = state)
 }
 
 /**
