@@ -64,7 +64,7 @@
             android:gravity="center"
             android:letterSpacing="0.2"
             android:paddingBottom="8dp"
-            android:text="ALPINE LINUX TERMINAL"
+            android:text="KIOSK RUNTIME"
             android:textColor="#C77DFF"
             android:textSize="14sp"
             android:textStyle="bold" />

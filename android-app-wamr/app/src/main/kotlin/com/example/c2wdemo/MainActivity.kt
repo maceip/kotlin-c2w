@@ -84,7 +84,7 @@ class MainActivity : AppCompatActivity() {
         setupInputHandling()
         setupStatusGauge()
 
-        appendOutput("=== Alpine Linux on WASM (WAMR Edition) ===\n")
+        appendOutput("=== Kiosk Runtime (WAMR Edition) ===\n")
         appendOutput("Runtime: ${WamrRuntime.version}\n")
         appendOutput("Commands: !save !restore !info !clear\n\n")
 

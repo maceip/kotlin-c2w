@@ -92,13 +92,9 @@ kotlin-c2w/
 └── container2wasm/       # c2w reference
 ```
 
-## Screenshots
+## Screenshot
 
-| Launch | Running |
-|--------|---------|
-| ![UI](android-ui-screenshot.png) | ![Demo](android-demo-screenshot.png) |
-
-*Screenshots show WAMR native runtime with checkpoint support*
+![Android Demo](android-demo-screenshot.png)
 
 ## CI/CD
 
