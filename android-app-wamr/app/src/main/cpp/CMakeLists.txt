@@ -39,6 +39,10 @@ set(WAMR_BUILD_BULK_MEMORY 1)
 set(WAMR_BUILD_REF_TYPES 1)
 set(WAMR_BUILD_SIMD 1)
 
+# Disable hardware bound checking (requires signal handlers that don't work on all platforms)
+set(WAMR_DISABLE_HW_BOUND_CHECK 1)
+set(WAMR_DISABLE_STACK_HW_BOUND_CHECK 1)
+
 # Disable unneeded
 set(WAMR_BUILD_MULTI_MODULE 0)
 set(WAMR_BUILD_MINI_LOADER 0)

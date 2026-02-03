@@ -144,6 +144,8 @@ class MainActivity : AppCompatActivity() {
             }
 
             // Load AOT (pre-compiled) or WASM from assets
+            // AOT = pre-compiled native code, much faster but requires matching architecture
+            // Set to false for x86_64 emulators, true for ARM64 devices
             val useAot = true
             val assetName = if (useAot) "alpine.aot" else "alpine.wasm"
 

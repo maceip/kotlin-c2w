@@ -485,14 +485,15 @@ Java_com_example_c2wdemo_WamrRuntime_nativeStart(
     g_equal_count = 0;
 
     // Configure WASI
-    const char* dir_list[] = { "/", "." };
-    uint32_t dir_count = 2;
+    // Note: c2w/Bochs runs entirely in memory - no host filesystem needed
+    // We only need stdin/stdout via pipes
     const char* env_list[] = { nullptr };  // Empty env for c2w
 
     // Set WASI args with our custom file descriptors
+    // Pass NULL for directories since c2w doesn't need filesystem access
     wasm_runtime_set_wasi_args_ex(
         g_wasm_module,
-        dir_list, dir_count,     // Preopened directories
+        nullptr, 0,              // No preopened directories
         nullptr, 0,              // Map dirs
         env_list, 0,             // Environment
         nullptr, 0,              // Args
@@ -749,13 +750,12 @@ Java_com_example_c2wdemo_WamrRuntime_nativeStartWithRestore(
     g_checkpoint_ready = false;
 
     // Configure WASI
-    const char* dir_list[] = { "/", "." };
-    uint32_t dir_count = 2;
+    // Note: c2w/Bochs runs entirely in memory - no host filesystem needed
     const char* env_list[] = { nullptr };
 
     wasm_runtime_set_wasi_args_ex(
         g_wasm_module,
-        dir_list, dir_count,
+        nullptr, 0,              // No preopened directories
         nullptr, 0,
         env_list, 0,
         nullptr, 0,
