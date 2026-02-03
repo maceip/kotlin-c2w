@@ -101,6 +101,66 @@ class SystemStatsProviderTest {
         assertEquals(0f, data.ramPercent, 0.001f)
         assertEquals(0, data.fps)
         assertEquals(0, data.latencyMs)
+        assertEquals(0f, data.thermalFraction, 0.001f)
+    }
+
+    @Test
+    fun `thermal fraction is between 0 and 1`() = runTest {
+        var lastData = GaugeData()
+        provider.start(this) { lastData = it }
+
+        advanceTimeBy(1100)
+
+        assertTrue("thermalFraction should be >= 0", lastData.thermalFraction >= 0f)
+        assertTrue("thermalFraction should be <= 1", lastData.thermalFraction <= 1f)
+
+        provider.stop()
+    }
+
+    @Test
+    fun `thermalColor returns green at zero`() {
+        val color = thermalColor(0f)
+        // Should be exactly the first stop: #00FF88
+        assertEquals(0f, color.red, 0.01f)
+        assertEquals(1f, color.green, 0.01f)
+        assertEquals(0.533f, color.blue, 0.02f)
+    }
+
+    @Test
+    fun `thermalColor returns red at high fraction`() {
+        val color = thermalColor(1.0f)
+        // Should be the last stop: #FF1A1A
+        assertEquals(1f, color.red, 0.01f)
+        assertTrue("Green channel should be low at high thermal", color.green < 0.15f)
+        assertTrue("Blue channel should be low at high thermal", color.blue < 0.15f)
+    }
+
+    @Test
+    fun `thermalColor clamps below zero`() {
+        val color = thermalColor(-0.5f)
+        val colorAtZero = thermalColor(0f)
+        assertEquals(colorAtZero, color)
+    }
+
+    @Test
+    fun `thermalColor clamps above one`() {
+        val color = thermalColor(1.5f)
+        val colorAtOne = thermalColor(1.0f)
+        assertEquals(colorAtOne, color)
+    }
+
+    @Test
+    fun `thermalColor interpolates mid values`() {
+        val cool = thermalColor(0f)
+        val warm = thermalColor(0.35f)
+        val hot = thermalColor(0.6f)
+        val critical = thermalColor(0.85f)
+        // Red channel should increase monotonically across stops
+        assertTrue("Red should increase from cool to warm", warm.red >= cool.red)
+        assertTrue("Red should increase from warm to hot", hot.red >= warm.red)
+        assertTrue("Red should increase from hot to critical", critical.red >= hot.red)
+        // Green channel should decrease from warm onward
+        assertTrue("Green should decrease from warm to critical", critical.green < warm.green)
     }
 
     @Test

@@ -26,6 +26,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.unit.dp
 
 private val ZimDarkBg = Color(0xFF0A0A14)
@@ -42,6 +43,7 @@ data class GaugeData(
     val ramPercent: Float = 0f,     // 0.0 to 1.0 — fraction of RAM used
     val fps: Int = 0,
     val latencyMs: Int = 0,
+    val thermalFraction: Float = 0f, // 0.0 = cool, 1.0 = emergency
 )
 
 /**
@@ -95,6 +97,7 @@ fun ZimStatusGauge(
         ) {
             SlimeBar(
                 fillFraction = gauge.ramPercent,
+                thermalFraction = gauge.thermalFraction,
                 modifier = Modifier.matchParentSize(),
             )
         }
@@ -146,33 +149,67 @@ private fun LedLabel(text: String) {
 @Preview(name = "Idle", widthDp = 52, heightDp = 300, showBackground = true, backgroundColor = 0xFF0D0D1A)
 @Composable
 private fun PreviewGaugeIdle() {
-    val state = remember { mutableStateOf(GaugeData(ramPercent = 0.35f, fps = 0, latencyMs = 0)) }
+    val state = remember { mutableStateOf(GaugeData(ramPercent = 0.35f, fps = 0, latencyMs = 0, thermalFraction = 0.05f)) }
     ZimStatusGauge(data = state)
 }
 
 @Preview(name = "Active", widthDp = 52, heightDp = 300, showBackground = true, backgroundColor = 0xFF0D0D1A)
 @Composable
 private fun PreviewGaugeActive() {
-    val state = remember { mutableStateOf(GaugeData(ramPercent = 0.62f, fps = 30, latencyMs = 42)) }
+    val state = remember { mutableStateOf(GaugeData(ramPercent = 0.62f, fps = 30, latencyMs = 42, thermalFraction = 0.3f)) }
     ZimStatusGauge(data = state)
 }
 
 @Preview(name = "High Load", widthDp = 52, heightDp = 300, showBackground = true, backgroundColor = 0xFF0D0D1A)
 @Composable
 private fun PreviewGaugeHighLoad() {
-    val state = remember { mutableStateOf(GaugeData(ramPercent = 0.92f, fps = 60, latencyMs = 850)) }
+    val state = remember { mutableStateOf(GaugeData(ramPercent = 0.92f, fps = 60, latencyMs = 850, thermalFraction = 0.55f)) }
     ZimStatusGauge(data = state)
 }
 
+@Preview(name = "Overheating", widthDp = 52, heightDp = 300, showBackground = true, backgroundColor = 0xFF0D0D1A)
+@Composable
+private fun PreviewGaugeOverheating() {
+    val state = remember { mutableStateOf(GaugeData(ramPercent = 0.78f, fps = 15, latencyMs = 400, thermalFraction = 0.9f)) }
+    ZimStatusGauge(data = state)
+}
+
+// 4-stop thermal gradient: cool → warming → hot → critical
+private val ThermalStops = listOf(
+    0.00f to Color(0xFF00FF88), // Zim green (cool)
+    0.35f to Color(0xFFCCFF00), // yellow-green (warming)
+    0.60f to Color(0xFFFF8800), // orange (hot)
+    0.85f to Color(0xFFFF1A1A), // red (critical)
+)
+
+/** Interpolates across the 4-stop thermal gradient. */
+internal fun thermalColor(fraction: Float): Color {
+    val f = fraction.coerceIn(0f, 1f)
+    for (i in 0 until ThermalStops.lastIndex) {
+        val (startF, startC) = ThermalStops[i]
+        val (endF, endC) = ThermalStops[i + 1]
+        if (f <= endF) {
+            val t = ((f - startF) / (endF - startF)).coerceIn(0f, 1f)
+            return lerp(startC, endC, t)
+        }
+    }
+    return ThermalStops.last().second
+}
+
 /**
- * Vertical green slime bar. Fills from bottom up.
- * Full = all green = no RAM left.
+ * Vertical slime bar. Fills from bottom up.
+ * Color reflects device thermal state via [thermalFraction].
  */
 @Composable
 private fun SlimeBar(
     fillFraction: Float,
+    thermalFraction: Float,
     modifier: Modifier = Modifier,
 ) {
+    val baseColor = thermalColor(thermalFraction)
+    val glowColor = lerp(baseColor, Color.White, 0.35f)
+    val darkColor = lerp(baseColor, Color.Black, 0.55f)
+
     Canvas(modifier = modifier) {
         val w = size.width
         val h = size.height
@@ -191,7 +228,7 @@ private fun SlimeBar(
 
             // Slime gradient: bright at top of fill, darker at bottom
             val slimeBrush = Brush.verticalGradient(
-                colors = listOf(ZimSlimeGlow, ZimSlimeGreen, ZimSlimeDark),
+                colors = listOf(glowColor, baseColor, darkColor),
                 startY = fillTop,
                 endY = h,
             )
@@ -204,7 +241,7 @@ private fun SlimeBar(
 
             // Slime surface glow line at the fill level
             drawRect(
-                color = ZimSlimeGlow.copy(alpha = 0.7f),
+                color = glowColor.copy(alpha = 0.7f),
                 topLeft = Offset(0f, fillTop),
                 size = Size(w, 2f.coerceAtMost(fillHeight)),
             )
