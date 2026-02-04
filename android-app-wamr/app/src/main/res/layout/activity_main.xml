@@ -12,6 +12,20 @@
         android:layout_margin="8dp"
         android:background="@drawable/invader_zim_frame">
 
+        <!-- KIOSK RUNTIME header embedded in top frame -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fontFamily="monospace"
+            android:gravity="center"
+            android:letterSpacing="0.2"
+            android:paddingTop="6dp"
+            android:paddingBottom="4dp"
+            android:text="KIOSK RUNTIME"
+            android:textColor="#C77DFF"
+            android:textSize="12sp"
+            android:textStyle="bold" />
+
         <!-- Strategic accent lights -->
         <View
             android:layout_width="20dp"
@@ -44,6 +58,14 @@
             android:layout_marginBottom="80dp"
             android:layout_marginStart="18dp"
             android:background="@drawable/glow_accent_pink" />
+
+        <!-- Zim status gauge: embedded in right frame edge -->
+        <androidx.compose.ui.platform.ComposeView
+            android:id="@+id/statusGauge"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_vertical|end"
+            android:layout_marginEnd="2dp" />
     </FrameLayout>
 
     <!-- Content root: InsetsAnimationLinearLayout for IME control via nested scrolling -->
@@ -56,62 +78,33 @@
         android:orientation="vertical"
         android:padding="24dp">
 
-        <!-- Title bar with Zim aesthetic -->
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:fontFamily="monospace"
-            android:gravity="center"
-            android:letterSpacing="0.2"
-            android:paddingBottom="8dp"
-            android:text="KIOSK RUNTIME"
-            android:textColor="#C77DFF"
-            android:textSize="14sp"
-            android:textStyle="bold" />
-
-        <!-- Terminal + Status gauge row -->
-        <LinearLayout
+        <!-- Terminal area: NestedScrollView for nested scrolling with IME control -->
+        <androidx.core.widget.NestedScrollView
+            android:id="@+id/terminalScroll"
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1"
-            android:orientation="horizontal">
+            android:background="#0A0A14"
+            android:fillViewport="true">
 
-            <!-- Terminal area: NestedScrollView for nested scrolling with IME control -->
-            <androidx.core.widget.NestedScrollView
-                android:id="@+id/terminalScroll"
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_weight="1"
-                android:background="#0A0A14"
-                android:fillViewport="true">
+            <EditText
+                android:id="@+id/terminalOutput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="@android:color/transparent"
+                android:cursorVisible="true"
+                android:fontFamily="monospace"
+                android:gravity="top|start"
+                android:imeOptions="actionSend"
+                android:inputType="textMultiLine|textNoSuggestions"
+                android:lineSpacingExtra="2dp"
+                android:minHeight="200dp"
+                android:padding="12dp"
+                android:textColor="#00FF88"
+                android:textCursorDrawable="@null"
+                android:textSize="11sp" />
 
-                <EditText
-                    android:id="@+id/terminalOutput"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:background="@android:color/transparent"
-                    android:cursorVisible="true"
-                    android:fontFamily="monospace"
-                    android:gravity="top|start"
-                    android:imeOptions="actionSend"
-                    android:inputType="textMultiLine|textNoSuggestions"
-                    android:lineSpacingExtra="2dp"
-                    android:minHeight="200dp"
-                    android:padding="12dp"
-                    android:textColor="#00FF88"
-                    android:textCursorDrawable="@null"
-                    android:textSize="11sp" />
-
-            </androidx.core.widget.NestedScrollView>
-
-            <!-- Zim status gauge (Compose) -->
-            <androidx.compose.ui.platform.ComposeView
-                android:id="@+id/statusGauge"
-                android:layout_width="wrap_content"
-                android:layout_height="match_parent"
-                android:layout_marginStart="4dp" />
-
-        </LinearLayout>
+        </androidx.core.widget.NestedScrollView>
 
         <!-- Zim helper bar: terminal shortcut keys, shown when keyboard is open -->
         <LinearLayout

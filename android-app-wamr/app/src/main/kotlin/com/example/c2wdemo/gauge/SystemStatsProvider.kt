@@ -61,6 +61,17 @@ class SystemStatsProvider(private val context: Context) {
         job = null
     }
 
+    fun pause() {
+        job?.cancel()
+        job = null
+    }
+
+    fun resume(scope: CoroutineScope) {
+        if (job != null) return
+        val cb = onUpdate ?: return
+        start(scope, cb)
+    }
+
     /** Call this each time the VM produces output. */
     fun onOutputEvent() {
         outputEventCount++

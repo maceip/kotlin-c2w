@@ -1,6 +1,11 @@
 package com.example.c2wdemo
 
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
 import android.os.Bundle
+import android.os.IBinder
 import android.text.InputFilter
 import android.text.Spanned
 import android.text.TextWatcher
@@ -18,6 +23,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.widget.NestedScrollView
 import androidx.lifecycle.lifecycleScope
 import com.example.c2wdemo.gauge.GaugeData
@@ -30,7 +36,6 @@ import com.example.c2wdemo.terminal.AnsiTerminalParser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 
 class MainActivity : AppCompatActivity() {
 
@@ -58,12 +63,48 @@ class MainActivity : AppCompatActivity() {
     /** Tracks accumulated output size for auto-close keyboard. */
     private var pendingOutputSize = 0
 
+    /** Bound VmService reference. */
+    private var vmService: VmService? = null
+    private var serviceBound = false
+
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+            val localBinder = binder as VmService.LocalBinder
+            vmService = localBinder.service
+            serviceBound = true
+
+            // Replay buffered output from service (output produced while UI was away)
+            val buffered = localBinder.service.getBufferedOutput()
+            if (buffered.isNotEmpty()) {
+                appendOutput(buffered)
+            }
+
+            // Register for live output
+            localBinder.service.setOutputCallback { text ->
+                runOnUiThread {
+                    appendOutput(text)
+                }
+            }
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            vmService = null
+            serviceBound = false
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         // Edge-to-edge: let the app handle window insets
         WindowCompat.setDecorFitsSystemWindows(window, false)
 
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+
+        // Immersive mode: hide status bar and navigation bar
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            hide(WindowInsetsCompat.Type.statusBars())
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
 
         terminalOutput = findViewById(R.id.terminalOutput)
         terminalScroll = findViewById(R.id.terminalScroll)
@@ -88,24 +129,32 @@ class MainActivity : AppCompatActivity() {
         appendOutput("Runtime: ${WamrRuntime.version}\n")
         appendOutput("Commands: !save !restore !info !clear\n\n")
 
-        // Set checkpoint path
-        val checkpointFile = File(filesDir, "vm_checkpoint.snap")
-        WamrRuntime.setCheckpointPath(checkpointFile.absolutePath)
+        // Start and bind to VmService
+        val serviceIntent = Intent(this, VmService::class.java)
+        startService(serviceIntent)
+        bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
+    }
 
-        // Show checkpoint status
-        if (WamrRuntime.hasCheckpoint()) {
-            val info = WamrRuntime.getCheckpointInfo() ?: "Checkpoint found"
-            appendOutput("$info\n")
-            appendOutput("Will restore from checkpoint (instant boot)\n\n")
-        } else {
-            appendOutput("No checkpoint - will do full boot\n")
-            appendOutput("Use !save after boot to create checkpoint\n\n")
+    override fun onStart() {
+        super.onStart()
+        if (::statsProvider.isInitialized) {
+            statsProvider.resume(lifecycleScope)
         }
+        // Reconnect output callback if already bound
+        vmService?.setOutputCallback { text ->
+            runOnUiThread {
+                appendOutput(text)
+            }
+        }
+    }
 
-        // Auto-start VM
-        lifecycleScope.launch {
-            startVm()
+    override fun onStop() {
+        super.onStop()
+        if (::statsProvider.isInitialized) {
+            statsProvider.pause()
         }
+        // Disconnect output callback so service doesn't hold Activity reference
+        vmService?.clearOutputCallback()
     }
 
     /**
@@ -349,69 +398,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private suspend fun startVm() = withContext(Dispatchers.IO) {
-        try {
-            withContext(Dispatchers.Main) {
-                appendOutput("Initializing WAMR...\n")
-            }
-
-            if (!WamrRuntime.initialize()) {
-                withContext(Dispatchers.Main) {
-                    appendOutput("ERROR: Failed to initialize WAMR\n")
-                }
-                return@withContext
-            }
-
-            val useAot = true
-            val assetName = if (useAot) "alpine.aot" else "alpine.wasm"
-
-            withContext(Dispatchers.Main) {
-                appendOutput("Loading $assetName...\n")
-            }
-
-            val wasmBytes = assets.open(assetName).use { it.readBytes() }
-
-            withContext(Dispatchers.Main) {
-                appendOutput("Size: ${wasmBytes.size / 1024 / 1024} MB\n")
-            }
-
-            if (!WamrRuntime.loadModule(wasmBytes)) {
-                withContext(Dispatchers.Main) {
-                    appendOutput("ERROR: Failed to load module\n")
-                }
-                return@withContext
-            }
-
-            val hasCheckpoint = WamrRuntime.hasCheckpoint()
-
-            withContext(Dispatchers.Main) {
-                if (hasCheckpoint) {
-                    appendOutput("Restoring from checkpoint...\n")
-                } else {
-                    appendOutput("Starting fresh (Bochs x86 boot)...\n")
-                }
-            }
-
-            val started = WamrRuntime.startWithRestore { text ->
-                runOnUiThread {
-                    appendOutput(text)
-                }
-            }
-
-            if (!started) {
-                withContext(Dispatchers.Main) {
-                    appendOutput("ERROR: Failed to start VM\n")
-                }
-            }
-
-        } catch (e: Exception) {
-            withContext(Dispatchers.Main) {
-                appendOutput("ERROR: ${e.message}\n")
-                e.printStackTrace()
-            }
-        }
-    }
-
     private fun appendOutput(text: String) {
         if (::statsProvider.isInitialized) {
             statsProvider.onOutputEvent()
@@ -491,6 +477,10 @@ class MainActivity : AppCompatActivity() {
         if (::statsProvider.isInitialized) {
             statsProvider.stop()
         }
-        WamrRuntime.destroy()
+        if (serviceBound) {
+            vmService?.clearOutputCallback()
+            unbindService(serviceConnection)
+            serviceBound = false
+        }
     }
 }
