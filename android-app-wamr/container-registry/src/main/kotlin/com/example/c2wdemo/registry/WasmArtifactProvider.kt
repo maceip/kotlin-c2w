@@ -19,6 +19,11 @@ import java.security.MessageDigest
 class WasmArtifactProvider(
     private val cacheDir: File,
     private val onProgress: ((String) -> Unit)? = null,
+    // TODO: Replace TTL-based staleness with proper digest comparison.
+    //  This should HEAD the manifest, compare the digest to what's cached,
+    //  and only re-pull if the tag has moved. Current approach just expires
+    //  after a fixed window regardless of whether the image actually changed.
+    private val cacheTtlMs: Long = DEFAULT_CACHE_TTL_MS,
 ) {
     private val puller = ContainerPuller(cacheDir, onProgress)
 
@@ -40,10 +45,14 @@ class WasmArtifactProvider(
         if (marker.exists()) {
             val wasmFile = findWasmFile(artifactDir)
             if (wasmFile != null) {
-                log("Using cached WASM artifact: ${wasmFile.name}")
-                return wasmFile
+                val age = System.currentTimeMillis() - marker.lastModified()
+                if (age < cacheTtlMs) {
+                    log("Using cached WASM artifact: ${wasmFile.name}")
+                    return wasmFile
+                }
+                log("Cache expired (${age / 3_600_000}h old), re-pulling...")
             }
-            // Cache is corrupt, re-pull
+            // Cache is stale or corrupt, re-pull
             artifactDir.deleteRecursively()
         }
 
@@ -221,5 +230,10 @@ class WasmArtifactProvider(
 
     private fun log(msg: String) {
         onProgress?.invoke(msg)
+    }
+
+    companion object {
+        /** Default cache TTL: 24 hours. */
+        const val DEFAULT_CACHE_TTL_MS = 24 * 60 * 60 * 1000L
     }
 }
