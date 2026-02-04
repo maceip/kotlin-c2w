@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "c2w-wamr"
 include(":app")
+include(":container-registry")
