@@ -1,0 +1,16 @@
+name: Docker Publish
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'Dockerfile*'
+      - 'docker/**'
+  workflow_dispatch:
+
+jobs:
+  docker:
+    uses: maceip/.github/.github/workflows/docker-publish.yml@main
+    with:
+      image-name: 'kotlin-c2w'
+      context: '.'
+      platforms: 'linux/amd64'
