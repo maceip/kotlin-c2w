@@ -1,0 +1,14 @@
+name: Security Scan
+on:
+  push:
+    branches: [main, master]
+  schedule:
+    - cron: '0 8 * * 1'
+  workflow_dispatch:
+
+jobs:
+  security:
+    uses: maceip/.github/.github/workflows/security-scan.yml@main
+    with:
+      severity-threshold: 'CRITICAL,HIGH'
+      cvss-threshold: 9.0
