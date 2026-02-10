@@ -1,0 +1,107 @@
+name: Smoke Test (On-Demand)
+
+# Remote agents trigger this with:
+#   gh workflow run smoke-test.yml --repo maceip/kotlin-c2w -f ref=main
+# Or via API:
+#   curl -X POST -H "Authorization: token $GH_TOKEN" \
+#     https://api.github.com/repos/maceip/kotlin-c2w/actions/workflows/smoke-test.yml/dispatches \
+#     -d '{"ref":"main"}'
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch or commit to test'
+        default: 'main'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          submodules: recursive
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install NDK
+        run: sdkmanager --install "ndk;27.2.12479018"
+
+      - name: Download assets
+        run: |
+          mkdir -p android-app-wamr/app/src/main/assets
+          curl -fsSL -o android-app-wamr/app/src/main/assets/alpine.aot \
+            "https://github.com/maceip/kotlin-c2w/releases/download/assets-v1/alpine.aot"
+          curl -fsSL -o android-app-wamr/app/src/main/assets/alpine.wasm \
+            "https://github.com/maceip/kotlin-c2w/releases/download/assets-v1/alpine.wasm"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build APK
+        working-directory: android-app-wamr
+        run: ./gradlew :app:assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smoke-apk
+          path: android-app-wamr/app/build/outputs/apk/debug/*.apk
+
+  smoke:
+    name: Smoke Test on Emulator
+    needs: build
+    runs-on: self-hosted
+    concurrency:
+      group: emulator
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: smoke-apk
+          path: smoke-apk
+
+      - name: Find APK
+        id: apk
+        run: echo "path=$(find smoke-apk -name '*.apk' | head -1)" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test (flock serialized)
+        run: |
+          exec 9>/tmp/emulator-smoke.lock
+          flock -w 300 9 || { echo "::error::Timed out waiting for emulator lock"; exit 1; }
+
+          adb wait-for-device
+          TIMEOUT=120; ELAPSED=0
+          while [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; do
+            [ $ELAPSED -ge $TIMEOUT ] && echo "::error::Timeout" && exit 1
+            sleep 2; ELAPSED=$((ELAPSED + 2))
+          done
+
+          PKG=com.example.c2wdemo.wamr
+          adb install -r "${{ steps.apk.outputs.path }}"
+          adb shell am force-stop $PKG
+          adb shell pm clear $PKG 2>/dev/null || true
+          adb logcat -c
+          adb shell am start -n $PKG/com.example.c2wdemo.MainActivity
+          sleep 15
+
+          CRASH=$(adb shell logcat -d -s AndroidRuntime:E)
+          ALIVE=$(adb shell dumpsys activity activities 2>/dev/null | grep $PKG || true)
+
+          adb shell am force-stop $PKG 2>/dev/null || true
+          adb uninstall $PKG 2>/dev/null || true
+
+          if echo "$CRASH" | grep -q "FATAL EXCEPTION"; then
+            echo "::error::CRASHED"; echo "$CRASH"; exit 1
+          fi
+          [ -z "$ALIVE" ] && echo "::error::Activity died" && exit 1
+          echo "PASSED - app launched without crashing"
