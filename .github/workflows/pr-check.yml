@@ -11,7 +11,7 @@ jobs:
       ndk-version: '27.2.12479018'
       submodules: true
       app-module: 'android-app-wamr/app'
-      gradle-task: ':android-app-wamr:app:assembleDebug'
+      gradle-task: ':app:assembleDebug'
       working-directory: 'android-app-wamr'
       expected-native-libs: 'lib/arm64-v8a/libc2w_wamr.so'
       min-apk-size: 80000000

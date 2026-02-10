@@ -17,7 +17,7 @@ jobs:
       submodules: true
       app-module: 'android-app-wamr/app'
       app-name: 'c2w-wamr'
-      gradle-task: ':android-app-wamr:app:assembleDebug'
+      gradle-task: ':app:assembleDebug'
       working-directory: 'android-app-wamr'
       expected-native-libs: 'lib/arm64-v8a/libc2w_wamr.so'
       min-apk-size: 80000000
