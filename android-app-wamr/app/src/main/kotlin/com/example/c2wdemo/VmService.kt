@@ -12,12 +12,12 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import com.example.c2wdemo.data.ImageManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import java.io.File
 
 class VmService : Service() {
 
@@ -38,19 +38,42 @@ class VmService : Service() {
     var vmStarted = false
         private set
 
+    /** The current image ID being run. */
+    var currentImageId: String? = null
+        private set
+
+    private lateinit var imageManager: ImageManager
+
     override fun onCreate() {
         super.onCreate()
-        val checkpointFile = File(filesDir, "vm_checkpoint.snap")
-        WamrRuntime.setCheckpointPath(checkpointFile.absolutePath)
+        imageManager = ImageManager(this)
         createNotificationChannel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(NOTIFICATION_ID, buildNotification())
-        if (!vmStarted) {
+        val imageId = intent?.getStringExtra(EXTRA_IMAGE_ID)
+
+        // If a different image is requested, stop the current VM
+        if (imageId != null && currentImageId != null && imageId != currentImageId && vmStarted) {
+            WamrRuntime.saveCheckpoint()
+            WamrRuntime.destroy()
+            vmStarted = false
+            outputBuffer.clear()
+        }
+
+        val targetImageId = imageId ?: currentImageId ?: DEFAULT_IMAGE_ID
+
+        // Set checkpoint path for this image
+        val checkpointPath = imageManager.getCheckpointPath(targetImageId)
+        WamrRuntime.setCheckpointPath(checkpointPath)
+
+        startForeground(NOTIFICATION_ID, buildNotification(targetImageId))
+
+        if (!vmStarted || (imageId != null && imageId != currentImageId)) {
+            currentImageId = targetImageId
             acquireWakeLock()
             serviceScope.launch(Dispatchers.IO) {
-                startVm(assets)
+                startVm(assets, targetImageId)
             }
         }
         return START_NOT_STICKY
@@ -90,10 +113,24 @@ class VmService : Service() {
         }
     }
 
+    // --- Public methods for checkpoint management ---
+
+    fun saveCheckpoint(): Boolean {
+        return if (WamrRuntime.isRunning) {
+            WamrRuntime.saveCheckpoint()
+            true
+        } else {
+            false
+        }
+    }
+
     // --- VM lifecycle ---
 
-    private suspend fun startVm(assets: AssetManager) {
+    private suspend fun startVm(assets: AssetManager, imageId: String) {
         try {
+            val imageInfo = ImageManager.getImageInfo(imageId)
+            val displayName = imageInfo?.displayName ?: imageId
+
             deliverOutput("Initializing WAMR...\n")
 
             if (!WamrRuntime.initialize()) {
@@ -101,12 +138,10 @@ class VmService : Service() {
                 return
             }
 
-            val useAot = true
-            val assetName = if (useAot) "alpine.aot" else "alpine.wasm"
+            val assetName = imageInfo?.assetName ?: "alpine.aot"
+            deliverOutput("Loading $displayName ($assetName)...\n")
 
-            deliverOutput("Loading $assetName...\n")
-
-            val wasmBytes = assets.open(assetName).use { it.readBytes() }
+            val wasmBytes = imageManager.getImageBytes(imageId, assets)
 
             deliverOutput("Size: ${wasmBytes.size / 1024 / 1024} MB\n")
 
@@ -118,9 +153,9 @@ class VmService : Service() {
             val hasCheckpoint = WamrRuntime.hasCheckpoint()
 
             if (hasCheckpoint) {
-                deliverOutput("Restoring from checkpoint...\n")
+                deliverOutput("Restoring $displayName from checkpoint...\n")
             } else {
-                deliverOutput("Starting fresh (Bochs x86 boot)...\n")
+                deliverOutput("Starting $displayName fresh (Bochs x86 boot)...\n")
             }
 
             vmStarted = true
@@ -166,15 +201,18 @@ class VmService : Service() {
         }
     }
 
-    private fun buildNotification(): Notification {
+    private fun buildNotification(imageId: String): Notification {
+        val imageInfo = ImageManager.getImageInfo(imageId)
+        val displayName = imageInfo?.displayName ?: imageId
+
         val pendingIntent = PendingIntent.getActivity(
             this, 0,
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Alpine Linux running")
-            .setContentText("WebAssembly VM is active")
+            .setContentTitle("$displayName running")
+            .setContentText("Friscy terminal is active")
             .setSmallIcon(R.drawable.ic_notification)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
@@ -198,9 +236,11 @@ class VmService : Service() {
     }
 
     companion object {
+        const val EXTRA_IMAGE_ID = "image_id"
+        private const val DEFAULT_IMAGE_ID = "claude"
         private const val CHANNEL_ID = "vm_service"
         private const val NOTIFICATION_ID = 1
-        private const val OUTPUT_BUFFER_CAPACITY = 8192
-        private const val OUTPUT_BUFFER_TRIM_TARGET = 6144
+        private const val OUTPUT_BUFFER_CAPACITY = 65536
+        private const val OUTPUT_BUFFER_TRIM_TARGET = 49152
     }
 }

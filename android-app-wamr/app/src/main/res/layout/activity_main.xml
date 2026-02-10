@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Invader Zim themed terminal - NOT octopus suction cups! -->
+<!-- Invader Zim themed terminal - Friscy Client -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -11,53 +11,6 @@
         android:layout_height="match_parent"
         android:layout_margin="8dp"
         android:background="@drawable/invader_zim_frame">
-
-        <!-- KIOSK RUNTIME header embedded in top frame -->
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:fontFamily="monospace"
-            android:gravity="center"
-            android:letterSpacing="0.2"
-            android:paddingTop="6dp"
-            android:paddingBottom="4dp"
-            android:text="KIOSK RUNTIME"
-            android:textColor="#C77DFF"
-            android:textSize="12sp"
-            android:textStyle="bold" />
-
-        <!-- Strategic accent lights -->
-        <View
-            android:layout_width="20dp"
-            android:layout_height="20dp"
-            android:layout_gravity="top|start"
-            android:layout_marginTop="20dp"
-            android:layout_marginStart="20dp"
-            android:background="@drawable/glow_accent_pink" />
-
-        <View
-            android:layout_width="16dp"
-            android:layout_height="16dp"
-            android:layout_gravity="top|end"
-            android:layout_marginTop="18dp"
-            android:layout_marginEnd="24dp"
-            android:background="@drawable/glow_accent_cyan" />
-
-        <View
-            android:layout_width="12dp"
-            android:layout_height="12dp"
-            android:layout_gravity="top|end"
-            android:layout_marginTop="36dp"
-            android:layout_marginEnd="20dp"
-            android:background="@drawable/glow_accent_pink" />
-
-        <View
-            android:layout_width="24dp"
-            android:layout_height="24dp"
-            android:layout_gravity="bottom|start"
-            android:layout_marginBottom="80dp"
-            android:layout_marginStart="18dp"
-            android:background="@drawable/glow_accent_pink" />
 
         <!-- Zim status gauge: embedded in right frame edge -->
         <androidx.compose.ui.platform.ComposeView
@@ -76,35 +29,91 @@
         android:layout_margin="8dp"
         android:clipToPadding="false"
         android:orientation="vertical"
-        android:padding="24dp">
+        android:paddingStart="24dp"
+        android:paddingEnd="24dp"
+        android:paddingBottom="24dp">
 
-        <!-- Terminal area: NestedScrollView for nested scrolling with IME control -->
-        <androidx.core.widget.NestedScrollView
-            android:id="@+id/terminalScroll"
+        <!-- Collapsible top app bar -->
+        <LinearLayout
+            android:id="@+id/topAppBar"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:background="@drawable/zim_top_bar_bg"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingHorizontal="8dp">
+
+            <!-- Image name -->
+            <TextView
+                android:id="@+id/tvImageName"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:fontFamily="monospace"
+                android:letterSpacing="0.1"
+                android:text="FRISCY"
+                android:textColor="#C77DFF"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+
+            <!-- Snapshot button -->
+            <ImageButton
+                android:id="@+id/btnSnapshot"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:layout_marginEnd="4dp"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:contentDescription="Snapshot"
+                android:padding="8dp"
+                android:scaleType="centerInside"
+                android:src="@drawable/ic_snapshot" />
+
+            <!-- Export button -->
+            <ImageButton
+                android:id="@+id/btnExport"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:layout_marginEnd="4dp"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:contentDescription="Export checkpoint"
+                android:padding="8dp"
+                android:scaleType="centerInside"
+                android:src="@drawable/ic_export" />
+
+            <!-- Import button -->
+            <ImageButton
+                android:id="@+id/btnImport"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:layout_marginEnd="4dp"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:contentDescription="Import checkpoint"
+                android:padding="8dp"
+                android:scaleType="centerInside"
+                android:src="@drawable/ic_import" />
+
+            <!-- Switch image button -->
+            <ImageButton
+                android:id="@+id/btnSwitch"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:contentDescription="Switch image"
+                android:padding="8dp"
+                android:scaleType="centerInside"
+                android:src="@drawable/ic_switch" />
+
+        </LinearLayout>
+
+        <!-- Terminal area: Termux TerminalView for full VT100/xterm emulation -->
+        <com.termux.view.TerminalView
+            android:id="@+id/terminalView"
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1"
             android:background="#0A0A14"
-            android:fillViewport="true">
-
-            <EditText
-                android:id="@+id/terminalOutput"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:background="@android:color/transparent"
-                android:cursorVisible="true"
-                android:fontFamily="monospace"
-                android:gravity="top|start"
-                android:imeOptions="actionSend"
-                android:inputType="textMultiLine|textNoSuggestions"
-                android:lineSpacingExtra="2dp"
-                android:minHeight="200dp"
-                android:padding="12dp"
-                android:textColor="#00FF88"
-                android:textCursorDrawable="@null"
-                android:textSize="11sp" />
-
-        </androidx.core.widget.NestedScrollView>
+            android:focusable="true"
+            android:focusableInTouchMode="true" />
 
         <!-- Zim helper bar: terminal shortcut keys, shown when keyboard is open -->
         <LinearLayout
@@ -164,11 +173,53 @@
                 android:id="@+id/btnUp"
                 android:layout_width="0dp"
                 android:layout_height="36dp"
+                android:layout_marginEnd="4dp"
                 android:layout_weight="1"
                 android:background="@drawable/zim_key_bg"
                 android:fontFamily="monospace"
                 android:gravity="center"
                 android:text="&#9650;"
+                android:textColor="#00FFFF"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/btnDown"
+                android:layout_width="0dp"
+                android:layout_height="36dp"
+                android:layout_marginEnd="4dp"
+                android:layout_weight="1"
+                android:background="@drawable/zim_key_bg"
+                android:fontFamily="monospace"
+                android:gravity="center"
+                android:text="&#9660;"
+                android:textColor="#00FFFF"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/btnTab"
+                android:layout_width="0dp"
+                android:layout_height="36dp"
+                android:layout_marginEnd="4dp"
+                android:layout_weight="1"
+                android:background="@drawable/zim_key_bg"
+                android:fontFamily="monospace"
+                android:gravity="center"
+                android:text="TAB"
+                android:textColor="#00FFFF"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/btnEsc"
+                android:layout_width="0dp"
+                android:layout_height="36dp"
+                android:layout_weight="1"
+                android:background="@drawable/zim_key_bg"
+                android:fontFamily="monospace"
+                android:gravity="center"
+                android:text="ESC"
                 android:textColor="#00FFFF"
                 android:textSize="12sp"
                 android:textStyle="bold" />

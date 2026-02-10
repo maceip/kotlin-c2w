@@ -1,0 +1,1 @@
+android-app-wamr/app/src/main/assets/*.aot filter=lfs diff=lfs merge=lfs -text

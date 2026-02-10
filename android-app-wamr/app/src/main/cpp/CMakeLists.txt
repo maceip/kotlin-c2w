@@ -22,7 +22,20 @@ message(STATUS "WAMR_ROOT_DIR: ${WAMR_ROOT_DIR}")
 
 # WAMR configuration - OPTIMIZED FOR PERFORMANCE
 set(WAMR_BUILD_PLATFORM "android")
-set(WAMR_BUILD_TARGET "AARCH64")
+
+# Auto-detect WAMR target from Android ABI
+if(ANDROID_ABI STREQUAL "arm64-v8a")
+    set(WAMR_BUILD_TARGET "AARCH64")
+elseif(ANDROID_ABI STREQUAL "x86_64")
+    set(WAMR_BUILD_TARGET "X86_64")
+elseif(ANDROID_ABI STREQUAL "armeabi-v7a")
+    set(WAMR_BUILD_TARGET "ARM")
+elseif(ANDROID_ABI STREQUAL "x86")
+    set(WAMR_BUILD_TARGET "X86_32")
+else()
+    message(FATAL_ERROR "Unsupported ANDROID_ABI: ${ANDROID_ABI}")
+endif()
+message(STATUS "WAMR_BUILD_TARGET: ${WAMR_BUILD_TARGET} (from ANDROID_ABI=${ANDROID_ABI})")
 
 # Performance features
 set(WAMR_BUILD_INTERP 1)
