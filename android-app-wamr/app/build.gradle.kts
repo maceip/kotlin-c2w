@@ -2,6 +2,7 @@ plugins {
     id("com.android.application")
     kotlin("android")
     kotlin("plugin.compose")
+    id("org.jetbrains.kotlinx.kover")
 }
 
 android {
@@ -114,4 +115,40 @@ dependencies {
     testImplementation("org.robolectric:robolectric:4.14.1")
     testImplementation("androidx.test:core:1.6.1")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
+}
+
+kover {
+    currentProject {
+        instrumentation {
+            excludedClasses.addAll(
+                "*.BuildConfig",
+                "*.R",
+                "*.R$*",
+                "*_Factory",
+                "*_MembersInjector"
+            )
+        }
+    }
+    reports {
+        filters {
+            excludes {
+                androidGeneratedClasses()
+                classes("*.BuildConfig")
+                annotatedBy(
+                    "androidx.compose.ui.tooling.preview.Preview",
+                    "androidx.compose.runtime.Composable"
+                )
+            }
+        }
+        variant("debug") {
+            xml {
+                onCheck = false
+                xmlFile = layout.buildDirectory.file("reports/kover/debug/report.xml")
+            }
+            html {
+                onCheck = false
+                htmlDir = layout.buildDirectory.dir("reports/kover/debug/html")
+            }
+        }
+    }
 }
