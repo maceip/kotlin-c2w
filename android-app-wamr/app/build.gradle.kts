@@ -82,8 +82,9 @@ android {
 }
 
 dependencies {
-    // Termux terminal emulator (VT100 state machine from JitPack)
-    implementation("com.github.termux.termux-app:terminal-emulator:v0.118.1")
+    // Termux terminal emulator — vendored from termux-app v0.118.1
+    // (was: implementation("com.github.termux.termux-app:terminal-emulator:v0.118.1"))
+    // Source files at app/src/main/java/com/termux/terminal/
     // Minimal dependencies - most work done in native code
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.core:core-ktx:1.17.0")
