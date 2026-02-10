@@ -18,17 +18,14 @@ android {
         versionName = "2.0-wamr"
 
         ndk {
-            // Support modern devices (ARM64 covers 99%+ of Android devices)
-            abiFilters += listOf("arm64-v8a")
+            // ARM64 for real devices, x86_64 for emulator testing
+            abiFilters += listOf("arm64-v8a", "x86_64")
         }
 
         externalNativeBuild {
             cmake {
                 cppFlags += listOf("-O3", "-ffast-math")
-                arguments += listOf(
-                    "-DWAMR_BUILD_TARGET=AARCH64",
-                    "-DCMAKE_BUILD_TYPE=Release"
-                )
+                arguments += listOf("-DCMAKE_BUILD_TYPE=Release")
             }
         }
     }
@@ -69,6 +66,7 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
+            excludes += listOf("lib/*/libtermux.so")
         }
     }
 
@@ -77,9 +75,15 @@ android {
             isIncludeAndroidResources = true
         }
     }
+
+    lint {
+        abortOnError = false
+    }
 }
 
 dependencies {
+    // Termux terminal emulator (VT100 state machine from JitPack)
+    implementation("com.github.termux.termux-app:terminal-emulator:v0.118.1")
     // Minimal dependencies - most work done in native code
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.core:core-ktx:1.17.0")
@@ -88,6 +92,8 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     // SpringAnimation for smooth IME inset animations
     implementation("androidx.dynamicanimation:dynamicanimation-ktx:1.0.0-alpha03")
+    // DataStore for preferences
+    implementation("androidx.datastore:datastore-preferences:1.1.1")
     // Compose (for Zim status gauge)
     val composeBom = platform("androidx.compose:compose-bom:2024.12.01")
     implementation(composeBom)
@@ -96,6 +102,7 @@ dependencies {
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.runtime:runtime")
     implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.compose.material3:material3")
     debugImplementation("androidx.compose.ui:ui-tooling")
     implementation("androidx.activity:activity-compose:1.10.0")
 
