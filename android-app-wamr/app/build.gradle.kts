@@ -18,8 +18,10 @@ android {
         versionName = "2.0-wamr"
 
         ndk {
-            // ARM64 for real devices, x86_64 for emulator testing
-            abiFilters += listOf("arm64-v8a", "x86_64")
+            // ARM64 only — WAMR SIMD native build uses arch-specific assembly
+            // that fails to cross-compile for x86_64 on CI runners.
+            // Modern x86_64 emulators can run arm64 code via binary translation.
+            abiFilters += listOf("arm64-v8a")
         }
 
         externalNativeBuild {
