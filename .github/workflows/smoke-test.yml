@@ -1,7 +1,7 @@
 name: Smoke Test (On-Demand)
 
 # Remote agents trigger this with:
-#   gh workflow run smoke-test.yml --repo maceip/kotlin-c2w -f ref=main
+#   gh workflow run smoke-test.yml --repo maceip/kotlin-c2w -f ref=master
 # Or via API:
 #   curl -X POST -H "Authorization: token $GH_TOKEN" \
 #     https://api.github.com/repos/maceip/kotlin-c2w/actions/workflows/smoke-test.yml/dispatches \
@@ -12,7 +12,7 @@ on:
     inputs:
       ref:
         description: 'Branch or commit to test'
-        default: 'main'
+        default: 'master'
         type: string
 
 permissions:
