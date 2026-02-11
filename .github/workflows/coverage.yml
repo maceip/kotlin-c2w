@@ -1,0 +1,21 @@
+name: Coverage
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  coverage:
+    uses: maceip/.github/.github/workflows/code-coverage.yml@main
+    with:
+      java-version: '21'
+      ndk-version: '27.2.12479018'
+      submodules: true
+      app-module: 'app'
+      working-directory: 'android-app-wamr'
+      extra-setup-script: |
+        mkdir -p android-app-wamr/app/src/main/assets
+        curl -fsSL -o android-app-wamr/app/src/main/assets/alpine.aot \
+          "https://github.com/maceip/kotlin-c2w/releases/download/assets-v1/alpine.aot"
+        curl -fsSL -o android-app-wamr/app/src/main/assets/alpine.wasm \
+          "https://github.com/maceip/kotlin-c2w/releases/download/assets-v1/alpine.wasm"
