@@ -50,7 +50,7 @@ jobs:
 
       - name: Build APK
         working-directory: android-app-wamr
-        run: ./gradlew :app:assembleDebug --no-daemon
+        run: chmod +x ./gradlew && ./gradlew :app:assembleDebug --no-daemon
 
       - uses: actions/upload-artifact@v4
         with:
