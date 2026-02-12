@@ -1,0 +1,136 @@
+name: Build Container Images
+
+# Builds riscv64 rootfs tarballs from Dockerfiles and uploads them
+# as GitHub Release assets under the "images-v1" tag.
+#
+# Trigger manually or on Dockerfile changes:
+#   gh workflow run build-images.yml --repo maceip/kotlin-c2w
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'images/*/Dockerfile'
+    branches: [master]
+
+permissions:
+  contents: write   # needed to create/update releases
+
+jobs:
+  build:
+    name: Build ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - alpine-base
+          - gemini-cli
+          - codex-cli
+          - claude-code
+        include:
+          - image: alpine-base
+            entry: /bin/bash
+          - image: gemini-cli
+            entry: /usr/local/bin/start-gemini
+          - image: codex-cli
+            entry: /usr/local/bin/start-codex
+          - image: claude-code
+            entry: /usr/local/bin/start-claude
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: riscv64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image for riscv64
+        run: |
+          docker buildx build \
+            --platform linux/riscv64 \
+            --load \
+            -t friscy-${{ matrix.image }}:latest \
+            images/${{ matrix.image }}/
+
+      - name: Export rootfs tarball
+        run: |
+          # Create a container (don't start it)
+          CID=$(docker create --platform linux/riscv64 friscy-${{ matrix.image }}:latest)
+          # Export full filesystem
+          docker export "$CID" > ${{ matrix.image }}.tar
+          docker rm "$CID"
+          # Show size
+          ls -lh ${{ matrix.image }}.tar
+          # Verify it has expected content
+          tar tf ${{ matrix.image }}.tar | head -20
+          tar tf ${{ matrix.image }}.tar | grep -q 'bin/sh' || {
+            echo "ERROR: rootfs does not contain bin/sh"
+            exit 1
+          }
+
+      - name: Upload tarball as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.image }}-rootfs
+          path: ${{ matrix.image }}.tar
+          retention-days: 30
+
+  release:
+    name: Upload to Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Collect tarballs
+        run: |
+          mkdir -p release/
+          for dir in artifacts/*-rootfs; do
+            name=$(basename "$dir" -rootfs)
+            cp "$dir/$name.tar" "release/$name.tar"
+            echo "Collected: $name.tar ($(du -h "release/$name.tar" | cut -f1))"
+          done
+          ls -lh release/
+
+      - name: Generate checksums
+        run: |
+          cd release
+          sha256sum *.tar > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="images-v1"
+          # Create release if it doesn't exist
+          gh release view "$TAG" --repo ${{ github.repository }} 2>/dev/null || \
+            gh release create "$TAG" \
+              --repo ${{ github.repository }} \
+              --title "Container Images v1" \
+              --notes "Pre-built riscv64 rootfs tarballs for friscy runtime.
+
+          ## Images
+          - **alpine-base.tar** — Alpine Linux 3.20 with bash, curl, vim
+          - **gemini-cli.tar** — Google Gemini CLI
+          - **codex-cli.tar** — OpenAI Codex CLI
+          - **claude-code.tar** — Anthropic Claude Code
+
+          Download and place in the app's image cache, or use the in-app image picker."
+
+          # Upload (overwrite existing assets)
+          for f in release/*.tar release/SHA256SUMS; do
+            gh release upload "$TAG" "$f" \
+              --repo ${{ github.repository }} \
+              --clobber
+          done

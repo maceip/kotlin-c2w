@@ -6,14 +6,7 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.os.Bundle
 import android.os.IBinder
-import android.text.InputFilter
-import android.text.Spanned
-import android.text.TextWatcher
-import android.text.Editable
-import android.view.KeyEvent
 import android.view.View
-import android.view.inputmethod.EditorInfo
-import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
@@ -24,44 +17,32 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import androidx.core.widget.NestedScrollView
 import androidx.lifecycle.lifecycleScope
 import com.example.c2wdemo.gauge.GaugeData
 import com.example.c2wdemo.gauge.SystemStatsProvider
 import com.example.c2wdemo.gauge.ZimStatusGauge
-import com.example.c2wdemo.ime.ControlFocusInsetsAnimationCallback
 import com.example.c2wdemo.ime.RootViewDeferringInsetsCallback
 import com.example.c2wdemo.ime.TranslateDeferringInsetsAnimationCallback
-import com.example.c2wdemo.terminal.AnsiTerminalParser
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import com.example.c2wdemo.terminal.FriscyTerminalBridge
+import com.example.c2wdemo.terminal.FriscyTerminalView
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var terminalOutput: EditText
-    private lateinit var terminalScroll: NestedScrollView
+    private lateinit var terminalView: FriscyTerminalView
     private lateinit var contentRoot: View
     private lateinit var zimHelperBar: LinearLayout
     private lateinit var btnCtrl: TextView
     private lateinit var btnPrevWord: TextView
     private lateinit var btnNextWord: TextView
     private lateinit var btnUp: TextView
-    private val ansiParser = AnsiTerminalParser()
     private lateinit var statsProvider: SystemStatsProvider
     private val gaugeState = mutableStateOf(GaugeData())
 
-    /** Character index where user input begins (everything before is read-only output). */
-    private var inputStartPos = 0
-
-    /** Set to true during internal edits to bypass the output protection filter. */
-    private var internalEdit = false
+    /** The bridge connecting friscy runtime to the Termux TerminalEmulator. */
+    private lateinit var bridge: FriscyTerminalBridge
 
     /** Sticky Ctrl mode: next character typed is sent as a control character. */
     private var ctrlSticky = false
-
-    /** Tracks accumulated output size for auto-close keyboard. */
-    private var pendingOutputSize = 0
 
     /** Bound VmService reference. */
     private var vmService: VmService? = null
@@ -76,13 +57,13 @@ class MainActivity : AppCompatActivity() {
             // Replay buffered output from service (output produced while UI was away)
             val buffered = localBinder.service.getBufferedOutput()
             if (buffered.isNotEmpty()) {
-                appendOutput(buffered)
+                feedOutput(buffered)
             }
 
             // Register for live output
             localBinder.service.setOutputCallback { text ->
                 runOnUiThread {
-                    appendOutput(text)
+                    feedOutput(text)
                 }
             }
         }
@@ -94,20 +75,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        // Edge-to-edge: let the app handle window insets
         WindowCompat.setDecorFitsSystemWindows(window, false)
-
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // Immersive mode: hide status bar and navigation bar
+        // Immersive mode
         WindowInsetsControllerCompat(window, window.decorView).apply {
             hide(WindowInsetsCompat.Type.statusBars())
             systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
 
-        terminalOutput = findViewById(R.id.terminalOutput)
-        terminalScroll = findViewById(R.id.terminalScroll)
+        terminalView = findViewById(R.id.terminalView)
         contentRoot = findViewById(R.id.contentRoot)
         zimHelperBar = findViewById(R.id.zimHelperBar)
         btnCtrl = findViewById(R.id.btnCtrl)
@@ -115,22 +93,34 @@ class MainActivity : AppCompatActivity() {
         btnNextWord = findViewById(R.id.btnNextWord)
         btnUp = findViewById(R.id.btnUp)
 
-        terminalOutput.setText("", TextView.BufferType.SPANNABLE)
-
-        // Prevent user from editing/deleting output text before inputStartPos
-        terminalOutput.filters = arrayOf(ProtectOutputFilter())
+        // Create the terminal bridge
+        bridge = FriscyTerminalBridge(object : FriscyTerminalBridge.BridgeListener {
+            override fun onScreenUpdated() {
+                terminalView.invalidate()
+            }
+            override fun onTitleChanged(title: String) {}
+            override fun onBell() {}
+            override fun onCopyText(text: String) {}
+            override fun onPasteRequest() {}
+        })
+        terminalView.bridge = bridge
 
         setupImeAnimation()
         setupZimHelperBar()
-        setupInputHandling()
         setupStatusGauge()
 
-        appendOutput("=== Kiosk Runtime (WAMR Edition) ===\n")
-        appendOutput("Runtime: ${WamrRuntime.version}\n")
-        appendOutput("Commands: !save !restore !info !clear\n\n")
-
-        // Start and bind to VmService
-        val serviceIntent = Intent(this, VmService::class.java)
+        // Start and bind to VmService, forwarding image parameters
+        val serviceIntent = Intent(this, VmService::class.java).apply {
+            putExtra(ImagePickerActivity.EXTRA_IMAGE_SOURCE,
+                intent.getStringExtra(ImagePickerActivity.EXTRA_IMAGE_SOURCE)
+                    ?: ImagePickerActivity.SOURCE_ASSET)
+            putExtra(ImagePickerActivity.EXTRA_ASSET_NAME,
+                intent.getStringExtra(ImagePickerActivity.EXTRA_ASSET_NAME) ?: "rootfs.tar")
+            putExtra(ImagePickerActivity.EXTRA_FILE_PATH,
+                intent.getStringExtra(ImagePickerActivity.EXTRA_FILE_PATH))
+            putExtra(ImagePickerActivity.EXTRA_ENTRY_POINT,
+                intent.getStringExtra(ImagePickerActivity.EXTRA_ENTRY_POINT) ?: "/bin/sh")
+        }
         startService(serviceIntent)
         bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
     }
@@ -140,11 +130,8 @@ class MainActivity : AppCompatActivity() {
         if (::statsProvider.isInitialized) {
             statsProvider.resume(lifecycleScope)
         }
-        // Reconnect output callback if already bound
         vmService?.setOutputCallback { text ->
-            runOnUiThread {
-                appendOutput(text)
-            }
+            runOnUiThread { feedOutput(text) }
         }
     }
 
@@ -153,18 +140,20 @@ class MainActivity : AppCompatActivity() {
         if (::statsProvider.isInitialized) {
             statsProvider.pause()
         }
-        // Disconnect output callback so service doesn't hold Activity reference
         vmService?.clearOutputCallback()
     }
 
     /**
-     * Set up the 3-layer WindowInsetsAnimation callback system:
-     *   1. Root: defer IME insets during animation, apply system bars as padding
-     *   2. Content views: translate during IME animation
-     *   3. EditText: manage focus with IME visibility
-     *
-     * Also tracks IME visibility to show/hide the Zim helper bar.
+     * Feed output from the friscy runtime into the terminal emulator.
+     * The TerminalEmulator handles all ANSI escape sequence parsing.
      */
+    private fun feedOutput(text: String) {
+        if (::statsProvider.isInitialized) {
+            statsProvider.onOutputEvent()
+        }
+        bridge.feedOutput(text)
+    }
+
     private fun setupImeAnimation() {
         // Layer 1: Root view defers IME insets during animation
         val deferringInsetsListener = RootViewDeferringInsetsCallback(
@@ -174,11 +163,11 @@ class MainActivity : AppCompatActivity() {
         ViewCompat.setWindowInsetsAnimationCallback(contentRoot, deferringInsetsListener)
         ViewCompat.setOnApplyWindowInsetsListener(contentRoot, deferringInsetsListener)
 
-        // Layer 2: Translate the terminal scroll area and helper bar during IME animation
+        // Layer 2: Translate the terminal view and helper bar during IME animation
         ViewCompat.setWindowInsetsAnimationCallback(
-            terminalScroll,
+            terminalView,
             TranslateDeferringInsetsAnimationCallback(
-                view = terminalScroll,
+                view = terminalView,
                 persistentInsetTypes = WindowInsetsCompat.Type.systemBars(),
                 deferredInsetTypes = WindowInsetsCompat.Type.ime(),
             ),
@@ -200,14 +189,8 @@ class MainActivity : AppCompatActivity() {
             },
         )
 
-        // Layer 2.5: Focus control on the EditText
-        ViewCompat.setWindowInsetsAnimationCallback(
-            terminalOutput,
-            ControlFocusInsetsAnimationCallback(terminalOutput),
-        )
-
-        // Track IME visibility changes to show/hide helper bar
-        ViewCompat.setOnApplyWindowInsetsListener(terminalScroll) { _, insets ->
+        // Track IME visibility changes
+        ViewCompat.setOnApplyWindowInsetsListener(terminalView) { _, insets ->
             updateHelperBarVisibility()
             insets
         }
@@ -219,13 +202,6 @@ class MainActivity : AppCompatActivity() {
         zimHelperBar.visibility = if (imeVisible) View.VISIBLE else View.GONE
     }
 
-    /**
-     * Set up the Zim helper bar buttons:
-     *   - CTRL: Sticky toggle. Next char typed → control character sent to VM.
-     *   - ◄W: Previous word (sends ESC b).
-     *   - W►: Next word (sends ESC f).
-     *   - ▲: Up arrow (sends ESC[A).
-     */
     private fun setupZimHelperBar() {
         btnCtrl.setOnClickListener {
             ctrlSticky = !ctrlSticky
@@ -234,24 +210,18 @@ class MainActivity : AppCompatActivity() {
         }
 
         btnPrevWord.setOnClickListener {
-            if (WamrRuntime.isRunning) {
-                statsProvider.onInputEvent()
-                WamrRuntime.sendInput("\u001Bb")
-            }
+            statsProvider.onInputEvent()
+            terminalView.sendInput("\u001Bb")
         }
 
         btnNextWord.setOnClickListener {
-            if (WamrRuntime.isRunning) {
-                statsProvider.onInputEvent()
-                WamrRuntime.sendInput("\u001Bf")
-            }
+            statsProvider.onInputEvent()
+            terminalView.sendInput("\u001Bf")
         }
 
         btnUp.setOnClickListener {
-            if (WamrRuntime.isRunning) {
-                statsProvider.onInputEvent()
-                WamrRuntime.sendInput("\u001B[A")
-            }
+            statsProvider.onInputEvent()
+            terminalView.sendInput("\u001B[A")
         }
     }
 
@@ -264,211 +234,6 @@ class MainActivity : AppCompatActivity() {
         val composeView = findViewById<ComposeView>(R.id.statusGauge)
         composeView.setContent {
             ZimStatusGauge(data = gaugeState)
-        }
-    }
-
-    private fun setupInputHandling() {
-        // Handle Enter key to send command
-        terminalOutput.setOnEditorActionListener { _, actionId, _ ->
-            if (actionId == EditorInfo.IME_ACTION_SEND) {
-                sendInlineCommand()
-                true
-            } else false
-        }
-        terminalOutput.setOnKeyListener { _, keyCode, event ->
-            if (keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN) {
-                sendInlineCommand()
-                true
-            } else false
-        }
-
-        // TextWatcher for sticky Ctrl: intercept character input
-        terminalOutput.addTextChangedListener(object : TextWatcher {
-            private var beforeLength = 0
-
-            override fun beforeTextChanged(s: CharSequence, start: Int, count: Int, after: Int) {
-                beforeLength = s.length
-            }
-
-            override fun onTextChanged(s: CharSequence, start: Int, before: Int, count: Int) {}
-
-            override fun afterTextChanged(s: Editable) {
-                if (!ctrlSticky || internalEdit) return
-
-                // Check if the user added exactly one character in the input region
-                if (s.length == beforeLength + 1) {
-                    val newCharIndex = s.length - 1
-                    if (newCharIndex >= inputStartPos) {
-                        val ch = s[newCharIndex]
-                        if (ch in 'a'..'z' || ch in 'A'..'Z') {
-                            // Convert to control character: Ctrl+A = 0x01, Ctrl+C = 0x03, etc.
-                            val ctrlChar = (ch.uppercaseChar() - '@').toChar()
-
-                            // Remove the typed character
-                            internalEdit = true
-                            s.delete(newCharIndex, newCharIndex + 1)
-                            internalEdit = false
-
-                            // Send control character to VM
-                            if (WamrRuntime.isRunning) {
-                                WamrRuntime.sendInput(ctrlChar.toString())
-                            }
-
-                            // Deactivate sticky Ctrl
-                            ctrlSticky = false
-                            btnCtrl.isSelected = false
-                            btnCtrl.setTextColor(0xFF00FFFF.toInt())
-                        }
-                    }
-                }
-            }
-        })
-    }
-
-    /**
-     * Extract the text the user typed after the output area, process it,
-     * and send it to the VM (or handle special commands).
-     */
-    private fun sendInlineCommand() {
-        val editable = terminalOutput.editableText ?: return
-        val fullText = editable.toString()
-        if (inputStartPos > fullText.length) {
-            inputStartPos = fullText.length
-        }
-        val cmd = fullText.substring(inputStartPos).trim()
-        if (cmd.isEmpty()) return
-
-        // Remove the typed text
-        internalEdit = true
-        editable.delete(inputStartPos, editable.length)
-        internalEdit = false
-
-        // Handle special commands
-        when (cmd.lowercase()) {
-            "!save" -> {
-                appendOutput("$cmd\n")
-                appendOutput("[Host] Saving checkpoint...\n")
-                lifecycleScope.launch(Dispatchers.IO) {
-                    val success = WamrRuntime.saveCheckpoint()
-                    withContext(Dispatchers.Main) {
-                        if (success) {
-                            val info = WamrRuntime.getCheckpointInfo() ?: "Saved"
-                            appendOutput("[Host] $info\n")
-                            appendOutput("[Host] Next launch will restore instantly\n")
-                        } else {
-                            appendOutput("[Host] Failed to save checkpoint\n")
-                        }
-                    }
-                }
-                return
-            }
-            "!restore" -> {
-                appendOutput("$cmd\n")
-                appendOutput("[Host] Deleting checkpoint...\n")
-                WamrRuntime.deleteCheckpoint()
-                appendOutput("[Host] Checkpoint deleted\n")
-                appendOutput("[Host] Restart app for fresh boot\n")
-                return
-            }
-            "!info" -> {
-                appendOutput("$cmd\n")
-                val info = WamrRuntime.getCheckpointInfo()
-                if (info != null) {
-                    appendOutput("[Host] $info\n")
-                } else {
-                    appendOutput("[Host] No checkpoint exists\n")
-                }
-                return
-            }
-            "!clear" -> {
-                ansiParser.reset()
-                internalEdit = true
-                terminalOutput.setText("", TextView.BufferType.SPANNABLE)
-                internalEdit = false
-                inputStartPos = 0
-                appendOutput("[Host] Terminal cleared\n")
-                return
-            }
-        }
-
-        // Regular command — send to VM
-        if (WamrRuntime.isRunning) {
-            statsProvider.onInputEvent()
-            WamrRuntime.sendInput(cmd + "\n")
-        }
-    }
-
-    private fun appendOutput(text: String) {
-        if (::statsProvider.isInitialized) {
-            statsProvider.onOutputEvent()
-        }
-        val parsed = ansiParser.parse(text)
-        val editable = terminalOutput.editableText
-
-        internalEdit = true
-        try {
-            // Insert parsed output at inputStartPos (before any user-typed text)
-            if (editable != null) {
-                editable.insert(inputStartPos, parsed)
-                inputStartPos += parsed.length
-            } else {
-                terminalOutput.append(parsed)
-                inputStartPos = terminalOutput.text.length
-            }
-
-            // Trim if too long (prevent OOM)
-            if (editable != null && editable.length > 50_000) {
-                val trimCount = editable.length - 37_500
-                editable.delete(0, trimCount)
-                inputStartPos = maxOf(0, inputStartPos - trimCount)
-            }
-        } finally {
-            internalEdit = false
-        }
-
-        // Auto-scroll NestedScrollView to bottom
-        terminalScroll.post {
-            terminalScroll.fullScroll(View.FOCUS_DOWN)
-        }
-
-        // Auto-close keyboard on large output bursts.
-        // If the IME is open and we get a large chunk of output (e.g., command output
-        // flooding the screen), dismiss the keyboard so the user can read.
-        pendingOutputSize += text.length
-        terminalScroll.removeCallbacks(outputSizeResetRunnable)
-        terminalScroll.postDelayed(outputSizeResetRunnable, 300)
-
-        if (pendingOutputSize > 500) {
-            val imeVisible = ViewCompat.getRootWindowInsets(contentRoot)
-                ?.isVisible(WindowInsetsCompat.Type.ime()) == true
-            if (imeVisible) {
-                ViewCompat.getWindowInsetsController(contentRoot)
-                    ?.hide(WindowInsetsCompat.Type.ime())
-                pendingOutputSize = 0
-            }
-        }
-    }
-
-    private val outputSizeResetRunnable = Runnable { pendingOutputSize = 0 }
-
-    /**
-     * InputFilter that prevents the user from modifying text before [inputStartPos].
-     */
-    private inner class ProtectOutputFilter : InputFilter {
-        override fun filter(
-            source: CharSequence,
-            start: Int,
-            end: Int,
-            dest: Spanned,
-            dstart: Int,
-            dend: Int
-        ): CharSequence? {
-            if (internalEdit) return null
-
-            if (dstart < inputStartPos) {
-                return dest.subSequence(dstart, dend)
-            }
-            return null
         }
     }
 

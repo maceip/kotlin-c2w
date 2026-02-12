@@ -16,18 +16,16 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 1
-        versionName = "2.0-wamr"
+        versionName = "3.0-friscy"
 
         ndk {
-            // ARM64 only — WAMR SIMD native build uses arch-specific assembly
-            // that fails to cross-compile for x86_64 on CI runners.
-            // Modern x86_64 emulators can run arm64 code via binary translation.
-            abiFilters += listOf("arm64-v8a")
+            // libriscv is pure C++ — builds for all Android ABIs
+            abiFilters += listOf("arm64-v8a", "x86_64")
         }
 
         externalNativeBuild {
             cmake {
-                cppFlags += listOf("-O3", "-ffast-math")
+                cppFlags += listOf("-O3")
                 arguments += listOf("-DCMAKE_BUILD_TYPE=Release")
             }
         }
@@ -65,7 +63,6 @@ android {
         }
     }
 
-    // Handle large WASM asset
     packaging {
         jniLibs {
             useLegacyPackaging = true

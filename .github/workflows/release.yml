@@ -16,18 +16,12 @@ jobs:
       ndk-version: '27.2.12479018'
       submodules: true
       app-module: 'android-app-wamr/app'
-      app-name: 'c2w-wamr'
+      app-name: 'friscy'
       gradle-task: ':app:assembleDebug'
       working-directory: 'android-app-wamr'
-      expected-native-libs: 'lib/arm64-v8a/libc2w_wamr.so'
-      min-apk-size: 80000000
+      expected-native-libs: 'lib/arm64-v8a/libfriscy_android.so'
+      min-apk-size: 500000
       check-alignment: true
-      extra-setup-script: |
-        mkdir -p android-app-wamr/app/src/main/assets
-        curl -fsSL -o android-app-wamr/app/src/main/assets/alpine.aot \
-          "https://github.com/maceip/kotlin-c2w/releases/download/assets-v1/alpine.aot"
-        curl -fsSL -o android-app-wamr/app/src/main/assets/alpine.wasm \
-          "https://github.com/maceip/kotlin-c2w/releases/download/assets-v1/alpine.wasm"
     secrets:
       KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
       KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}

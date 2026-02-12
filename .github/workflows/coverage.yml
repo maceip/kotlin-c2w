@@ -13,9 +13,3 @@ jobs:
       submodules: true
       app-module: 'app'
       working-directory: 'android-app-wamr'
-      extra-setup-script: |
-        mkdir -p android-app-wamr/app/src/main/assets
-        curl -fsSL -o android-app-wamr/app/src/main/assets/alpine.aot \
-          "https://github.com/maceip/kotlin-c2w/releases/download/assets-v1/alpine.aot"
-        curl -fsSL -o android-app-wamr/app/src/main/assets/alpine.wasm \
-          "https://github.com/maceip/kotlin-c2w/releases/download/assets-v1/alpine.wasm"

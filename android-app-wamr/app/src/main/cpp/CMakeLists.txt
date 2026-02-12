@@ -1,92 +1,61 @@
-# WAMR-based c2w Android Runtime
+# friscy Android Runtime — libriscv RISC-V 64 emulator
 cmake_minimum_required(VERSION 3.18)
-project(c2w_wamr)
+project(friscy_android)
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_C_STANDARD 11)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# WAMR source directory
-# Allow override via cmake variable
-if(NOT DEFINED WAMR_ROOT_DIR)
-    # Compute path: cpp -> main -> src -> app -> android-app-wamr -> kotlin-c2w
-    get_filename_component(KOTLIN_C2W_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../.." ABSOLUTE)
-    set(WAMR_ROOT_DIR "${KOTLIN_C2W_ROOT}/wamr-integration/wamr")
+# Locate libriscv: cpp -> main -> src -> app -> android-app-wamr -> kotlin-c2w
+get_filename_component(KOTLIN_C2W_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../.." ABSOLUTE)
+set(LIBRISCV_DIR "${KOTLIN_C2W_ROOT}/vendor/libriscv/lib")
+
+if(NOT EXISTS "${LIBRISCV_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR "libriscv not found at ${LIBRISCV_DIR}. Run: git submodule update --init")
 endif()
 
-# Verify WAMR exists
-if(NOT EXISTS ${WAMR_ROOT_DIR}/core/iwasm/include/wasm_export.h)
-    message(FATAL_ERROR "WAMR not found at ${WAMR_ROOT_DIR}")
-endif()
+message(STATUS "LIBRISCV_DIR: ${LIBRISCV_DIR}")
 
-message(STATUS "WAMR_ROOT_DIR: ${WAMR_ROOT_DIR}")
+# libriscv configuration — optimized for performance
+set(RISCV_64I ON CACHE BOOL "" FORCE)
+set(RISCV_32I OFF CACHE BOOL "" FORCE)   # Only need 64-bit
+set(RISCV_128I OFF CACHE BOOL "" FORCE)
+set(RISCV_EXT_A ON CACHE BOOL "" FORCE)  # Atomics
+set(RISCV_EXT_C ON CACHE BOOL "" FORCE)  # Compressed instructions
+set(RISCV_EXT_V OFF CACHE BOOL "" FORCE) # Vector (not needed yet)
+set(RISCV_FCSR OFF CACHE BOOL "" FORCE)
+set(RISCV_FLAT_RW_ARENA ON CACHE BOOL "" FORCE)
+set(RISCV_THREADED ON CACHE BOOL "" FORCE)  # Computed goto dispatch
+set(RISCV_BINARY_TRANSLATION OFF CACHE BOOL "" FORCE)  # Disable for Phase 1
+set(RISCV_MEMORY_TRAPS ON CACHE BOOL "" FORCE)
+set(RISCV_DEBUG OFF CACHE BOOL "" FORCE)
+set(RISCV_EXPERIMENTAL OFF CACHE BOOL "" FORCE)
 
-# WAMR configuration - OPTIMIZED FOR PERFORMANCE
-set(WAMR_BUILD_PLATFORM "android")
-set(WAMR_BUILD_TARGET "AARCH64")
+add_subdirectory(${LIBRISCV_DIR} ${CMAKE_BINARY_DIR}/libriscv)
 
-# Performance features
-set(WAMR_BUILD_INTERP 1)
-set(WAMR_BUILD_FAST_INTERP 1)
-set(WAMR_BUILD_AOT 1)
-set(WAMR_BUILD_JIT 0)  # JIT requires LLVM
-
-# WASI for c2w
-set(WAMR_BUILD_LIBC_BUILTIN 1)
-set(WAMR_BUILD_LIBC_WASI 1)
-
-# Memory features
-set(WAMR_BUILD_BULK_MEMORY 1)
-set(WAMR_BUILD_REF_TYPES 1)
-set(WAMR_BUILD_SIMD 1)
-
-# Disable hardware bound checking (requires signal handlers that don't work on all platforms)
-set(WAMR_DISABLE_HW_BOUND_CHECK 1)
-set(WAMR_DISABLE_STACK_HW_BOUND_CHECK 1)
-
-# Disable unneeded
-set(WAMR_BUILD_MULTI_MODULE 0)
-set(WAMR_BUILD_MINI_LOADER 0)
-set(WAMR_BUILD_LIB_PTHREAD 0)
-set(WAMR_BUILD_LIB_WASI_THREADS 0)
-set(WAMR_BUILD_WASI_NN 0)
-set(WAMR_BUILD_DEBUG_INTERP 0)
-set(WAMR_BUILD_MEMORY_PROFILING 0)
-set(WAMR_BUILD_PERF_PROFILING 0)
-set(WAMR_BUILD_CUSTOM_NAME_SECTION 0)
-set(WAMR_BUILD_DUMP_CALL_STACK 0)
-set(WAMR_BUILD_LOAD_CUSTOM_SECTION 0)
-
-# Include WAMR build scripts
-include(${WAMR_ROOT_DIR}/build-scripts/runtime_lib.cmake)
-
-# Our native library
-add_library(c2w_wamr SHARED
-    c2w_runtime.cpp
-    ${WAMR_RUNTIME_LIB_SOURCE}
+# Our JNI bridge library
+add_library(friscy_android SHARED
+    friscy_runtime.cpp
 )
 
-target_include_directories(c2w_wamr PRIVATE
-    ${WAMR_ROOT_DIR}/core/iwasm/include
+# Include the friscy runtime headers (vfs, elf_loader, syscalls, etc.)
+target_include_directories(friscy_android PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-target_link_libraries(c2w_wamr
+target_link_libraries(friscy_android
+    riscv
     android
     log
-    m
-    dl
 )
 
-# Optimization flags
-target_compile_options(c2w_wamr PRIVATE
+# libriscv needs exceptions
+target_compile_options(friscy_android PRIVATE
     -O3
-    -ffast-math
-    -fno-exceptions
-    -fno-rtti
+    -fexceptions
     -ffunction-sections
     -fdata-sections
 )
 
-target_link_options(c2w_wamr PRIVATE
+target_link_options(friscy_android PRIVATE
     -Wl,--gc-sections
-    -Wl,-z,max-page-size=16384
 )

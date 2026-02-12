@@ -11,13 +11,13 @@ import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import java.io.File
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import java.io.File
 
 class VmService : Service() {
 
@@ -31,6 +31,15 @@ class VmService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var outputCallback: ((String) -> Unit)? = null
 
+    /** Image source: "asset" or "file". */
+    private var imageSource: String = ImagePickerActivity.SOURCE_ASSET
+    /** Asset name (when source is "asset"). */
+    private var assetName: String = "rootfs.tar"
+    /** File path (when source is "file"). */
+    private var filePath: String? = null
+    /** Entry point binary inside the rootfs. */
+    private var entryPoint: String = "/bin/sh"
+
     /** Ring buffer of recent output so reconnecting UI can replay missed text. */
     private val outputBuffer = StringBuilder(OUTPUT_BUFFER_CAPACITY)
 
@@ -40,12 +49,19 @@ class VmService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        val checkpointFile = File(filesDir, "vm_checkpoint.snap")
-        WamrRuntime.setCheckpointPath(checkpointFile.absolutePath)
         createNotificationChannel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Read image params from intent
+        intent?.let {
+            imageSource = it.getStringExtra(ImagePickerActivity.EXTRA_IMAGE_SOURCE)
+                ?: ImagePickerActivity.SOURCE_ASSET
+            assetName = it.getStringExtra(ImagePickerActivity.EXTRA_ASSET_NAME) ?: "rootfs.tar"
+            filePath = it.getStringExtra(ImagePickerActivity.EXTRA_FILE_PATH)
+            entryPoint = it.getStringExtra(ImagePickerActivity.EXTRA_ENTRY_POINT) ?: "/bin/sh"
+        }
+
         startForeground(NOTIFICATION_ID, buildNotification())
         if (!vmStarted) {
             acquireWakeLock()
@@ -60,16 +76,13 @@ class VmService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
-        if (WamrRuntime.isRunning) {
-            WamrRuntime.saveCheckpoint()
-        }
         stopSelf()
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        FriscyRuntime.destroy()
         releaseWakeLock()
-        WamrRuntime.destroy()
         serviceScope.cancel()
     }
 
@@ -94,47 +107,48 @@ class VmService : Service() {
 
     private suspend fun startVm(assets: AssetManager) {
         try {
-            deliverOutput("Initializing WAMR...\n")
+            deliverOutput("Initializing friscy runtime...\r\n")
 
-            if (!WamrRuntime.initialize()) {
-                deliverOutput("ERROR: Failed to initialize WAMR\n")
+            if (!FriscyRuntime.initialize()) {
+                deliverOutput("ERROR: Failed to initialize friscy\r\n")
                 return
             }
 
-            val useAot = true
-            val assetName = if (useAot) "alpine.aot" else "alpine.wasm"
+            deliverOutput("Loading rootfs ($entryPoint)...\r\n")
 
-            deliverOutput("Loading $assetName...\n")
-
-            val wasmBytes = assets.open(assetName).use { it.readBytes() }
-
-            deliverOutput("Size: ${wasmBytes.size / 1024 / 1024} MB\n")
-
-            if (!WamrRuntime.loadModule(wasmBytes)) {
-                deliverOutput("ERROR: Failed to load module\n")
-                return
+            val tarBytes = when (imageSource) {
+                ImagePickerActivity.SOURCE_FILE -> {
+                    val file = File(filePath ?: error("No file path"))
+                    if (!file.exists()) error("Image file not found: $filePath")
+                    deliverOutput("Source: ${file.name}\r\n")
+                    file.readBytes()
+                }
+                else -> {
+                    deliverOutput("Source: asset/$assetName\r\n")
+                    assets.open(assetName).use { it.readBytes() }
+                }
             }
+            deliverOutput("rootfs: ${tarBytes.size} bytes\r\n")
 
-            val hasCheckpoint = WamrRuntime.hasCheckpoint()
-
-            if (hasCheckpoint) {
-                deliverOutput("Restoring from checkpoint...\n")
-            } else {
-                deliverOutput("Starting fresh (Bochs x86 boot)...\n")
+            val loaded = FriscyRuntime.loadRootfs(tarBytes, entryPoint) { text ->
+                deliverOutput(text)
+            }
+            if (!loaded) {
+                deliverOutput("ERROR: Failed to load rootfs\r\n")
+                return
             }
 
             vmStarted = true
 
-            val started = WamrRuntime.startWithRestore { text ->
-                deliverOutput(text)
+            if (!FriscyRuntime.start()) {
+                deliverOutput("ERROR: Failed to start execution\r\n")
+                vmStarted = false
+                return
             }
 
-            if (!started) {
-                deliverOutput("ERROR: Failed to start VM\n")
-                vmStarted = false
-            }
+            deliverOutput("[friscy] Shell started\r\n")
         } catch (e: Exception) {
-            deliverOutput("ERROR: ${e.message}\n")
+            deliverOutput("ERROR: ${e.message}\r\n")
             vmStarted = false
         }
     }
@@ -159,7 +173,7 @@ class VmService : Service() {
                 "VM Service",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Keeps the WebAssembly VM running in the background"
+                description = "Keeps the friscy runtime running in the background"
             }
             val nm = getSystemService(NotificationManager::class.java)
             nm.createNotificationChannel(channel)
@@ -173,8 +187,8 @@ class VmService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Alpine Linux running")
-            .setContentText("WebAssembly VM is active")
+            .setContentTitle("friscy runtime")
+            .setContentText("RISC-V emulator active")
             .setSmallIcon(R.drawable.ic_notification)
             .setContentIntent(pendingIntent)
             .setOngoing(true)

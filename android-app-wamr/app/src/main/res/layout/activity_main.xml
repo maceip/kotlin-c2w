@@ -78,33 +78,14 @@
         android:orientation="vertical"
         android:padding="24dp">
 
-        <!-- Terminal area: NestedScrollView for nested scrolling with IME control -->
-        <androidx.core.widget.NestedScrollView
-            android:id="@+id/terminalScroll"
+        <!-- Terminal area: FriscyTerminalView with proper VT100 rendering -->
+        <com.example.c2wdemo.terminal.FriscyTerminalView
+            android:id="@+id/terminalView"
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1"
             android:background="#0A0A14"
-            android:fillViewport="true">
-
-            <EditText
-                android:id="@+id/terminalOutput"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:background="@android:color/transparent"
-                android:cursorVisible="true"
-                android:fontFamily="monospace"
-                android:gravity="top|start"
-                android:imeOptions="actionSend"
-                android:inputType="textMultiLine|textNoSuggestions"
-                android:lineSpacingExtra="2dp"
-                android:minHeight="200dp"
-                android:padding="12dp"
-                android:textColor="#00FF88"
-                android:textCursorDrawable="@null"
-                android:textSize="11sp" />
-
-        </androidx.core.widget.NestedScrollView>
+            android:padding="4dp" />
 
         <!-- Zim helper bar: terminal shortcut keys, shown when keyboard is open -->
         <LinearLayout

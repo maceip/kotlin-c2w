@@ -14,21 +14,25 @@
         android:theme="@style/Theme.C2WDemo"
         android:largeHeap="true">
         <activity
-            android:name=".MainActivity"
+            android:name=".ImagePickerActivity"
             android:exported="true"
-            android:configChanges="orientation|screenSize|keyboardHidden">
+            android:theme="@style/Theme.C2WDemo">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".MainActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
         <service
             android:name=".VmService"
             android:foregroundServiceType="specialUse"
             android:exported="false">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="WebAssembly virtual machine running Linux via x86 emulation" />
+                android:value="RISC-V container runtime running Linux via libriscv emulation" />
         </service>
     </application>
 
