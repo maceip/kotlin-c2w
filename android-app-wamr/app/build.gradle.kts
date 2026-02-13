@@ -18,6 +18,8 @@ android {
         versionCode = 1
         versionName = "3.0-friscy"
 
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
         ndk {
             // libriscv is pure C++ — builds for all Android ABIs
             abiFilters += listOf("arm64-v8a", "x86_64")
@@ -112,6 +114,11 @@ dependencies {
     testImplementation("org.robolectric:robolectric:4.14.1")
     testImplementation("androidx.test:core:1.6.1")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
+
+    // Instrumented tests
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:core:1.6.1")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }
 
 kover {

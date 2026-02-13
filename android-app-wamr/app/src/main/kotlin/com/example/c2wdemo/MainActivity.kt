@@ -7,6 +7,7 @@ import android.content.ServiceConnection
 import android.os.Bundle
 import android.os.IBinder
 import android.view.View
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
@@ -19,6 +20,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import com.example.c2wdemo.gauge.GaugeData
+import com.example.c2wdemo.gauge.StatRail
 import com.example.c2wdemo.gauge.SystemStatsProvider
 import com.example.c2wdemo.gauge.ZimStatusGauge
 import com.example.c2wdemo.ime.RootViewDeferringInsetsCallback
@@ -35,8 +37,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnPrevWord: TextView
     private lateinit var btnNextWord: TextView
     private lateinit var btnUp: TextView
+    private lateinit var bookCover: FrameLayout
+    private lateinit var statRailView: ComposeView
     private lateinit var statsProvider: SystemStatsProvider
     private val gaugeState = mutableStateOf(GaugeData())
+    private var backSpineHandler: BackSpineHandler? = null
 
     /** The bridge connecting friscy runtime to the Termux TerminalEmulator. */
     private lateinit var bridge: FriscyTerminalBridge
@@ -92,6 +97,8 @@ class MainActivity : AppCompatActivity() {
         btnPrevWord = findViewById(R.id.btnPrevWord)
         btnNextWord = findViewById(R.id.btnNextWord)
         btnUp = findViewById(R.id.btnUp)
+        bookCover = findViewById(R.id.bookCover)
+        statRailView = findViewById(R.id.statRailView)
 
         // Create the terminal bridge
         bridge = FriscyTerminalBridge(object : FriscyTerminalBridge.BridgeListener {
@@ -108,6 +115,7 @@ class MainActivity : AppCompatActivity() {
         setupImeAnimation()
         setupZimHelperBar()
         setupStatusGauge()
+        setupBackSpine()
 
         // Start and bind to VmService, forwarding image parameters
         val serviceIntent = Intent(this, VmService::class.java).apply {
@@ -237,8 +245,22 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun setupBackSpine() {
+        statRailView.setContent {
+            StatRail(data = gaugeState)
+        }
+        val handler = BackSpineHandler(
+            bookCover = bookCover,
+            statRailView = statRailView,
+            onFinish = { finish() },
+        )
+        backSpineHandler = handler
+        onBackPressedDispatcher.addCallback(this, handler.callback)
+    }
+
     override fun onDestroy() {
         super.onDestroy()
+        backSpineHandler?.destroy()
         if (::statsProvider.isInitialized) {
             statsProvider.stop()
         }

@@ -13,13 +13,20 @@
 #include <random>
 #include <iostream>
 #include <set>
+#include <unordered_map>
 #include <unistd.h>  // usleep
+#include <sys/socket.h>
+#include <poll.h>
 #include "android_io.hpp"
 
 namespace syscalls {
 
 using Machine = riscv::Machine<riscv::RISCV64>;
 
+// Network bridge function pointers (set by friscy_runtime.cpp after network.hpp is included).
+// Avoids including network.hpp here (which would cause macro clashes with fcntl.h).
+inline bool (*net_is_socket_fd)(int fd) = nullptr;
+inline int  (*net_get_native_fd)(int fd) = nullptr;  // returns native fd or -1
 
 // Cooperative fork state — single-process vfork emulation.
 // On clone(): save parent registers, return 0 (child runs).
@@ -56,6 +63,121 @@ struct ForkState {
 inline ForkState g_fork = {};
 inline pid_t g_next_pid = 100;
 
+// Cooperative thread scheduler for CLONE_THREAD.
+struct VThread {
+    uint64_t regs[32];
+    uint64_t pc;
+    int tid;
+    bool active;
+    bool waiting;
+    uint64_t futex_addr;
+    int32_t futex_val;
+    uint64_t clear_child_tid;
+    uint64_t syscall_budget;
+};
+constexpr int MAX_VTHREADS = 8;
+constexpr uint64_t THREAD_QUANTUM = 50000;
+struct ThreadScheduler {
+    VThread threads[MAX_VTHREADS];
+    int current = 0;
+    int count = 0;
+
+    void init(int main_tid) {
+        threads[0].tid = main_tid;
+        threads[0].active = true;
+        threads[0].waiting = false;
+        current = 0;
+        count = 1;
+    }
+
+    int add_thread(int tid) {
+        for (int i = 0; i < MAX_VTHREADS; i++) {
+            if (!threads[i].active) {
+                threads[i].tid = tid;
+                threads[i].active = true;
+                threads[i].waiting = false;
+                threads[i].clear_child_tid = 0;
+                threads[i].syscall_budget = THREAD_QUANTUM;
+                count++;
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    int next_runnable(int skip = -1) {
+        for (int i = 0; i < MAX_VTHREADS; i++) {
+            if (i != skip && threads[i].active && !threads[i].waiting) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    int wake(uint64_t addr, int max_wake) {
+        int woken = 0;
+        for (int i = 0; i < MAX_VTHREADS && woken < max_wake; i++) {
+            if (threads[i].active && threads[i].waiting && threads[i].futex_addr == addr) {
+                threads[i].waiting = false;
+                woken++;
+            }
+        }
+        return woken;
+    }
+
+    void remove_thread(int tid) {
+        for (int i = 0; i < MAX_VTHREADS; i++) {
+            if (threads[i].active && threads[i].tid == tid) {
+                threads[i].active = false;
+                threads[i].waiting = false;
+                count--;
+                return;
+            }
+        }
+    }
+};
+inline ThreadScheduler g_sched;
+
+inline void save_thread(Machine& m, VThread& t) {
+    for (int i = 0; i < 32; i++) t.regs[i] = m.cpu.reg(i);
+    t.pc = m.cpu.pc();
+}
+
+inline void restore_thread(Machine& m, VThread& t) {
+    for (int i = 0; i < 32; i++) m.cpu.reg(i) = t.regs[i];
+    m.cpu.jump(t.pc);
+}
+
+inline bool switch_to_thread(Machine& m, int target_idx) {
+    if (target_idx < 0 || target_idx == g_sched.current) return false;
+    auto& cur = g_sched.threads[g_sched.current];
+    auto& tgt = g_sched.threads[target_idx];
+    save_thread(m, cur);
+    restore_thread(m, tgt);
+    g_sched.current = target_idx;
+    tgt.syscall_budget = THREAD_QUANTUM;
+    return true;
+}
+
+inline void maybe_preempt(Machine& m) {
+    if (g_sched.count <= 1) return;
+    auto& cur = g_sched.threads[g_sched.current];
+    if (cur.syscall_budget > 0) {
+        cur.syscall_budget--;
+        return;
+    }
+    int next = g_sched.next_runnable(g_sched.current);
+    if (next >= 0) {
+        static int preempt_count = 0;
+        if (++preempt_count <= 20)
+            fprintf(stderr, "[preempt] t%d -> t%d (quantum exhausted)\n",
+                    g_sched.current, next);
+        switch_to_thread(m, next);
+    } else {
+        cur.syscall_budget = THREAD_QUANTUM;
+    }
+}
+
 // Execution context saved from initial load — used by execve to
 // reload binary segments and set up a fresh stack.
 struct ExecContext {
@@ -72,6 +194,9 @@ struct ExecContext {
     uint64_t original_stack_top = 0;    // Stack top from initial setup
     uint64_t heap_start = 0;            // Start of brk heap area
     uint64_t heap_size = 0;             // Size of brk heap area
+    uint64_t brk_base = 0;             // Current binary's break base (end of BSS, page-aligned)
+    uint64_t brk_current = 0;          // Current break pointer
+    bool brk_overridden = false;       // True after execve sets up new brk
     std::vector<std::string> env;        // Environment variables
     bool dynamic = false;                // Using dynamic linker?
 };
@@ -142,19 +267,35 @@ namespace nr {
     constexpr int sched_getparam     = 121;
     constexpr int sched_getaffinity  = 123;
     constexpr int uname         = 160;
+    constexpr int getrlimit     = 163;
     constexpr int prctl         = 167;
     constexpr int mremap        = 216;
     constexpr int madvise       = 233;
     constexpr int getrandom     = 278;
+    constexpr int flock         = 32;
+    constexpr int fchmod        = 52;
+    constexpr int fchmodat      = 53;
+    constexpr int fchownat      = 54;
+    constexpr int pwritev       = 70;
+    constexpr int fsync         = 82;
+    constexpr int sched_yield   = 124;
+    constexpr int kill          = 129;
+    constexpr int tkill         = 130;
+    constexpr int tgkill        = 131;
     constexpr int sigaltstack   = 132;
+    constexpr int rt_sigreturn  = 139;
     constexpr int getresuid     = 148;
     constexpr int getresgid     = 150;
     constexpr int getpgid       = 155;
+    constexpr int getgroups     = 158;
     constexpr int umask         = 166;
+    constexpr int socketpair    = 199;
+    constexpr int sendmsg       = 211;
     constexpr int clock_getres  = 114;
     constexpr int recvmsg       = 212;
     constexpr int membarrier    = 283;
     constexpr int statx         = 291;
+    constexpr int close_range   = 436;
     constexpr int rseq          = 293;
     constexpr int io_uring_setup = 425;
     constexpr int faccessat2    = 439;
@@ -194,16 +335,18 @@ constexpr int AT_FDCWD = -100;
 constexpr int AT_EMPTY_PATH = 0x1000;
 constexpr int AT_SYMLINK_NOFOLLOW = 0x100;
 
-// O_* flags
-constexpr int O_RDONLY = 0;
-constexpr int O_WRONLY = 1;
-constexpr int O_RDWR = 2;
-constexpr int O_CREAT = 0100;
-constexpr int O_EXCL = 0200;
-constexpr int O_TRUNC = 01000;
-constexpr int O_APPEND = 02000;
-constexpr int O_DIRECTORY = 0200000;
-constexpr int O_CLOEXEC = 02000000;
+// O_* flags (prefixed to avoid macro clashes with Android NDK <fcntl.h>)
+namespace oflags {
+constexpr int RDONLY = 0;
+constexpr int WRONLY = 1;
+constexpr int RDWR = 2;
+constexpr int CREAT = 0100;
+constexpr int EXCL = 0200;
+constexpr int TRUNC = 01000;
+constexpr int APPEND = 02000;
+constexpr int DIRECTORY = 0200000;
+constexpr int CLOEXEC = 02000000;
+}
 
 // Error codes (negated for syscall return values)
 namespace err {
@@ -239,10 +382,64 @@ inline vfs::VirtualFS& get_fs(Machine& m) {
     return *get_ctx(m)->fs;
 }
 
+// Saved reference to libriscv's built-in mmap handler.
+inline Machine::syscall_t libriscv_mmap_handler = nullptr;
+
 // Syscall handlers (static functions, no captures)
 namespace handlers {
 
+// Forward declaration — sys_exit has the fork parent restore logic
+static void sys_exit(Machine& m);
+
+// exit_group — terminate all threads and stop the machine
+static void sys_exit_group(Machine& m) {
+    int exit_code = m.template sysarg<int>(0);
+    fprintf(stderr, "[exit_group] code=%d from thread t%d (tid=%d)\n",
+            exit_code, g_sched.current,
+            g_sched.count > 0 ? g_sched.threads[g_sched.current].tid : -1);
+
+    if (g_fork.in_child) {
+        sys_exit(m);
+        return;
+    }
+
+    for (int i = 0; i < MAX_VTHREADS; i++) {
+        g_sched.threads[i].active = false;
+        g_sched.threads[i].waiting = false;
+    }
+    g_sched.count = 0;
+
+    m.stop();
+    m.set_result(exit_code);
+}
+
 static void sys_exit(Machine& m) {
+    // If a cooperative thread is exiting (not the main thread or a fork child),
+    // remove it from the scheduler and switch to another thread.
+    if (g_sched.count > 1 && g_sched.current != 0) {
+        int exiting = g_sched.current;
+        auto& t = g_sched.threads[exiting];
+        int exit_code = m.template sysarg<int>(0);
+        fprintf(stderr, "[exit] thread tid=%d exit_code=%d, switching\n", t.tid, exit_code);
+
+        if (t.clear_child_tid != 0) {
+            m.memory.template write<int32_t>(t.clear_child_tid, 0);
+            g_sched.wake(t.clear_child_tid, 1);
+            fprintf(stderr, "[exit] cleared child_tid at 0x%lx\n", (long)t.clear_child_tid);
+        }
+
+        t.active = false;
+        t.waiting = false;
+        g_sched.count--;
+
+        int next = g_sched.next_runnable(exiting);
+        if (next >= 0) {
+            restore_thread(m, g_sched.threads[next]);
+            g_sched.current = next;
+            return;
+        }
+    }
+
     if (g_fork.in_child) {
         // "Child" is exiting — restore parent state
         g_fork.exit_status = m.template sysarg<int>(0);
@@ -319,19 +516,80 @@ static void sys_exit(Machine& m) {
         m.set_result(g_fork.child_pid);
         return;
     }
+    int exit_code = m.template sysarg<int>(0);
+    fprintf(stderr, "[exit] main thread exit code=%d\n", exit_code);
     m.stop();
-    m.set_result(m.template sysarg<int>(0));
+    m.set_result(exit_code);
 }
 
-// clone — cooperative vfork emulation for single-process emulator.
-// Saves parent state, returns 0 (child context). When child calls
-// exit/exit_group, parent state is restored with child PID as return.
+// clone — cooperative vfork emulation + thread creation.
 static void sys_clone(Machine& m) {
+    uint64_t flags = m.sysarg(0);
+
+    constexpr uint64_t F_CLONE_VM     = 0x00000100;
+    constexpr uint64_t F_CLONE_THREAD = 0x00010000;
+    constexpr uint64_t F_CLONE_VFORK  = 0x00004000;
+
+    if ((flags & F_CLONE_THREAD) || ((flags & F_CLONE_VM) && !(flags & F_CLONE_VFORK))) {
+        // Thread creation with cooperative scheduling.
+        constexpr uint64_t F_CLONE_PARENT_SETTID  = 0x00100000;
+        constexpr uint64_t F_CLONE_CHILD_CLEARTID = 0x00200000;
+        constexpr uint64_t F_CLONE_SETTLS         = 0x00080000;
+
+        int tid = g_next_pid++;
+        auto child_stack = m.sysarg(1);
+
+        if (flags & F_CLONE_PARENT_SETTID) {
+            auto parent_tidptr = m.sysarg(2);
+            if (parent_tidptr != 0) {
+                m.memory.template write<int32_t>(parent_tidptr, tid);
+            }
+        }
+
+        if (g_sched.count == 0) {
+            g_sched.init(g_next_pid - 2);
+        }
+
+        int child_idx = g_sched.add_thread(tid);
+        if (child_idx < 0) {
+            fprintf(stderr, "[clone] thread slots full, faking tid=%d\n", tid);
+            m.set_result(tid);
+            return;
+        }
+
+        int parent_idx = g_sched.current;
+        save_thread(m, g_sched.threads[parent_idx]);
+        g_sched.threads[parent_idx].regs[10] = (uint64_t)tid;
+
+        m.cpu.reg(riscv::REG_SP) = child_stack;
+        m.set_result(0);
+
+        if (flags & F_CLONE_SETTLS) {
+            auto tls = m.sysarg(3);
+            m.cpu.reg(4) = tls;  // tp register = x4
+        }
+
+        if (flags & F_CLONE_CHILD_CLEARTID) {
+            auto child_tidptr = m.sysarg(4);
+            g_sched.threads[child_idx].clear_child_tid = child_tidptr;
+        }
+
+        g_sched.current = child_idx;
+        g_sched.threads[child_idx].pc = m.cpu.pc();
+
+        static int thread_count = 0;
+        if (++thread_count <= 10)
+            fprintf(stderr, "[clone] thread #%d cooperative, tid=%d stack=0x%lx\n",
+                    thread_count, tid, (long)child_stack);
+        return;
+    }
+
     if (g_fork.in_child) {
-        // Nested fork not supported
         m.set_result(-11);  // -EAGAIN
         return;
     }
+
+    fprintf(stderr, "[clone] fork flags=0x%lx\n", (long)flags);
 
     // Save parent registers
     for (int i = 0; i < 32; i++) {
@@ -632,19 +890,42 @@ static void sys_execve(Machine& m) {
             std::cout << "[friscy] execve: loading new binary " << resolved
                       << " (" << new_binary.size() << " bytes)\n";
 
-            // Reset writable data of old main binary
-            if (g_exec_ctx.exec_rw_start < g_exec_ctx.exec_rw_end) {
-                m.memory.memset(g_exec_ctx.exec_rw_start, 0,
-                    g_exec_ctx.exec_rw_end - g_exec_ctx.exec_rw_start);
+            // Check if new binary fits in arena
+            constexpr uint64_t ARENA_SIZE = 1ULL << riscv::encompassing_Nbit_arena;
+            auto [new_lo, new_hi] = elf::get_load_range(new_binary);
+            uint64_t exec_base = 0x40000;
+            uint64_t load_end = exec_base + new_hi - new_lo;
+            std::cerr << "[execve] ELF load range: lo=0x" << std::hex << new_lo
+                      << " hi=0x" << new_hi << " load_end=0x" << load_end
+                      << " arena=0x" << ARENA_SIZE << std::dec << "\n";
+
+            if (load_end >= ARENA_SIZE) {
+                std::cerr << "[execve] ERROR: binary too large for arena!\n";
+                m.set_result(-12);  // -ENOMEM
+                return;
             }
 
-            // Load new main binary segments at the same PIE base
-            uint64_t exec_base = g_exec_ctx.exec_base;
+            // Make arena writable for loading
+            {
+                riscv::PageAttributes rw;
+                rw.read = true; rw.write = true;
+                m.memory.set_page_attr(exec_base, load_end - exec_base, rw);
+            }
+            // Also make old binary range writable
+            {
+                auto [old_lo, old_hi] = elf::get_load_range(g_exec_ctx.exec_binary);
+                uint64_t old_start = g_exec_ctx.exec_base;
+                uint64_t old_end = old_start + old_hi;
+                riscv::PageAttributes rw;
+                rw.read = true; rw.write = true;
+                m.memory.set_page_attr(old_start, old_end - old_start, rw);
+            }
+
+            // Load new main binary segments at PIE base
             if (exec_info.type == elf::ET_DYN) {
                 auto [lo, hi] = elf::get_load_range(new_binary);
-                exec_base = 0x40000;  // standard PIE base
+                exec_base = 0x40000;
                 dynlink::load_elf_segments(m, new_binary, exec_base);
-                uint64_t actual_base = exec_base - lo + lo;  // = exec_base
                 exec_info.phdr_addr += (exec_base - lo);
                 exec_info.entry_point += (exec_base - lo);
                 g_exec_ctx.exec_base = exec_base;
@@ -658,12 +939,10 @@ static void sys_execve(Machine& m) {
                 g_exec_ctx.exec_rw_end = rw_hi;
             }
 
-            // If the new binary needs a dynamic linker, reload interpreter too
             uint64_t interp_base = g_exec_ctx.interp_base;
             uint64_t interp_entry = g_exec_ctx.interp_entry;
 
             if (exec_info.is_dynamic && !exec_info.interpreter.empty()) {
-                // Load interpreter from VFS
                 std::string interp_resolved = resolve_path(fs, exec_info.interpreter);
                 auto interp_binary = read_vfs_file(fs, interp_resolved);
                 if (interp_binary.empty()) {
@@ -673,13 +952,14 @@ static void sys_execve(Machine& m) {
                     return;
                 }
 
-                // Reset old interpreter writable data
-                if (g_exec_ctx.interp_rw_start < g_exec_ctx.interp_rw_end) {
-                    m.memory.memset(g_exec_ctx.interp_rw_start, 0,
-                        g_exec_ctx.interp_rw_end - g_exec_ctx.interp_rw_start);
+                // Make old interpreter pages writable before overwriting
+                {
+                    auto [ilo, ihi] = elf::get_load_range(g_exec_ctx.interp_binary);
+                    riscv::PageAttributes rw;
+                    rw.read = true; rw.write = true;
+                    m.memory.set_page_attr(interp_base, ihi - ilo, rw);
                 }
 
-                // Reload interpreter at same base
                 dynlink::load_elf_segments(m, interp_binary, interp_base);
 
                 auto interp_info = elf::parse_elf(interp_binary);
@@ -697,16 +977,55 @@ static void sys_execve(Machine& m) {
                 g_exec_ctx.interp_entry = interp_entry;
             }
 
-            // Update exec context
             g_exec_ctx.exec_binary = std::move(new_binary);
             g_exec_ctx.exec_info = exec_info;
 
-            // Set up fresh stack
+            // Reset memory layout after loading new binary
+            {
+                uint64_t max_end = load_end;
+                if (exec_info.is_dynamic) {
+                    auto [ilo, ihi] = elf::get_load_range(g_exec_ctx.interp_binary);
+                    uint64_t interp_end2 = interp_base + (ihi - ilo);
+                    if (interp_end2 > max_end) max_end = interp_end2;
+                }
+
+                uint64_t new_brk_base = (max_end + 4095) & ~4095ULL;
+                g_exec_ctx.brk_base = new_brk_base;
+                g_exec_ctx.brk_current = new_brk_base;
+                g_exec_ctx.brk_overridden = true;
+
+                constexpr uint64_t BRK_MAX = 16ULL << 20;
+                riscv::PageAttributes rw;
+                rw.read = true; rw.write = true;
+                m.memory.set_page_attr(new_brk_base, BRK_MAX, rw);
+
+                uint64_t new_mmap_start = new_brk_base + BRK_MAX;
+                if (m.memory.mmap_address() < new_mmap_start) {
+                    m.memory.mmap_address() = new_mmap_start;
+                }
+
+                std::cerr << "[execve] memory layout reset: brk=0x" << std::hex
+                          << new_brk_base << " mmap=0x"
+                          << m.memory.mmap_address() << std::dec << "\n";
+            }
+
+            // Relocate stack if new binary overlaps the old stack
+            uint64_t new_stack_top = g_exec_ctx.original_stack_top;
+            if (new_stack_top < load_end + 0x10000) {
+                new_stack_top = interp_base - 0x1000;
+                std::cerr << "[execve] relocating stack: 0x" << std::hex
+                          << g_exec_ctx.original_stack_top << " -> 0x"
+                          << new_stack_top << std::dec << "\n";
+                riscv::PageAttributes rw;
+                rw.read = true; rw.write = true;
+                m.memory.set_page_attr(new_stack_top - 0x10000, 0x10000, rw);
+                g_exec_ctx.original_stack_top = new_stack_top;
+            }
+
             uint64_t sp = dynlink::setup_dynamic_stack(
                 m, exec_info, interp_base, args,
-                g_exec_ctx.env, g_exec_ctx.original_stack_top);
+                g_exec_ctx.env, new_stack_top);
 
-            // Clear registers and jump
             for (int i = 1; i < 32; i++) m.cpu.reg(i) = 0;
             m.cpu.reg(riscv::REG_SP) = sp;
             m.cpu.jump(exec_info.is_dynamic ? interp_entry : exec_info.entry_point);
@@ -714,7 +1033,14 @@ static void sys_execve(Machine& m) {
             std::cout << "[friscy] execve: jumping to 0x" << std::hex
                       << (exec_info.is_dynamic ? interp_entry : exec_info.entry_point)
                       << std::dec << "\n";
-            return;  // don't set_result — execve doesn't return on success
+            return;
+        } catch (const riscv::MachineException& e) {
+            std::cerr << "[friscy] execve: MachineException loading " << resolved
+                      << ": " << e.what()
+                      << " (data=0x" << std::hex << e.data() << std::dec
+                      << ", type=" << e.type() << ")\n";
+            m.set_result(-8);  // -ENOEXEC
+            return;
         } catch (const std::exception& e) {
             std::cerr << "[friscy] execve: failed to load " << resolved
                       << ": " << e.what() << "\n";
@@ -753,7 +1079,8 @@ static void sys_openat(Machine& m) {
         return;
     }
 
-    int fd = (flags & O_DIRECTORY) ? fs.opendir(path) : fs.open(path, flags);
+    int fd = (flags & oflags::DIRECTORY) ? fs.opendir(path) : fs.open(path, flags);
+    fprintf(stderr, "[open] %s => fd=%d flags=0x%x\n", path.c_str(), fd, flags);
     m.set_result(fd);
 }
 
@@ -799,6 +1126,20 @@ static void sys_read(Machine& m) {
         return;
     }
 
+    // Socket FDs: delegate to recv
+    if (net_is_socket_fd && net_is_socket_fd(fd)) {
+        int native_fd = net_get_native_fd ? net_get_native_fd(fd) : -1;
+        if (native_fd >= 0) {
+            std::vector<uint8_t> buf(count);
+            ssize_t n = ::recv(native_fd, buf.data(), count, 0);
+            if (n > 0) {
+                m.memory.memcpy(buf_addr, buf.data(), n);
+            }
+            m.set_result(n >= 0 ? n : -errno);
+            return;
+        }
+    }
+
     std::vector<uint8_t> buf(count);
     ssize_t n = fs.read(fd, buf.data(), count);
     if (n > 0) {
@@ -832,6 +1173,18 @@ static void sys_write(Machine& m) {
             m.set_result(err::INVAL);
         }
         return;
+    }
+
+    // Socket FDs: delegate to send
+    if (net_is_socket_fd && net_is_socket_fd(fd)) {
+        int native_fd = net_get_native_fd ? net_get_native_fd(fd) : -1;
+        if (native_fd >= 0) {
+            std::vector<uint8_t> buf(count);
+            m.memory.memcpy_out(buf.data(), buf_addr, count);
+            ssize_t n = ::send(native_fd, buf.data(), count, 0);
+            m.set_result(n >= 0 ? n : -errno);
+            return;
+        }
     }
 
     m.set_result(err::BADF);
@@ -878,6 +1231,31 @@ static void sys_writev(Machine& m) {
         }
         m.set_result(total);
         return;
+    }
+
+    // Socket FDs: gather iov and send
+    if (net_is_socket_fd && net_is_socket_fd(fd)) {
+        int native_fd = net_get_native_fd ? net_get_native_fd(fd) : -1;
+        if (native_fd >= 0) {
+            size_t total = 0;
+            for (int i = 0; i < iovcnt; i++) {
+                uint64_t base = m.memory.template read<uint64_t>(iov_addr + i * 16);
+                uint64_t len = m.memory.template read<uint64_t>(iov_addr + i * 16 + 8);
+                if (len > 0) {
+                    std::vector<uint8_t> buf(len);
+                    m.memory.memcpy_out(buf.data(), base, len);
+                    ssize_t n = ::send(native_fd, buf.data(), len, 0);
+                    if (n < 0) {
+                        m.set_result(total > 0 ? (int64_t)total : -errno);
+                        return;
+                    }
+                    total += n;
+                    if (static_cast<size_t>(n) < len) break;
+                }
+            }
+            m.set_result(total);
+            return;
+        }
     }
 
     m.set_result(err::BADF);
@@ -1075,12 +1453,26 @@ static void sys_faccessat(Machine& m) {
 
 static void sys_getpid(Machine& m) { m.set_result(1); }
 static void sys_getppid(Machine& m) { m.set_result(0); }
-static void sys_gettid(Machine& m) { m.set_result(1); }
+static void sys_gettid(Machine& m) {
+    if (g_sched.count > 0) {
+        m.set_result(g_sched.threads[g_sched.current].tid);
+    } else {
+        m.set_result(1);
+    }
+}
 static void sys_getuid(Machine& m) { m.set_result(0); }
 static void sys_geteuid(Machine& m) { m.set_result(0); }
 static void sys_getgid(Machine& m) { m.set_result(0); }
 static void sys_getegid(Machine& m) { m.set_result(0); }
-static void sys_set_tid_address(Machine& m) { m.set_result(1); }
+static void sys_set_tid_address(Machine& m) {
+    auto tidptr = m.sysarg(0);
+    if (g_sched.count > 0) {
+        g_sched.threads[g_sched.current].clear_child_tid = tidptr;
+        m.set_result(g_sched.threads[g_sched.current].tid);
+    } else {
+        m.set_result(1);
+    }
+}
 static void sys_set_robust_list(Machine& m) { m.set_result(0); }
 
 static void sys_clock_gettime(Machine& m) {
@@ -1093,6 +1485,9 @@ static void sys_clock_gettime(Machine& m) {
     lts.tv_nsec = ts.tv_nsec;
     m.memory.memcpy(tp_addr, &lts, sizeof(lts));
     m.set_result(0);
+
+    // Preemptive scheduling: yield to other threads periodically
+    maybe_preempt(m);
 }
 
 static void sys_getrandom(Machine& m) {
@@ -1108,36 +1503,226 @@ static void sys_getrandom(Machine& m) {
     m.set_result(count);
 }
 
-// NOTE: brk, mmap, munmap are handled by libriscv's
-// setup_linux_syscalls() + add_mman_syscalls(). Do NOT override them here.
+// mmap — intercept file-backed mappings, custom bump allocator for anonymous
+static void sys_mmap(Machine& m) {
+    auto* ctx = get_ctx(m);
+    int vfd = m.template sysarg<int>(4);
 
-// mprotect — no-op during child execution to prevent RELRO from
-// poisoning page permissions and the decoder cache. The child's
-// interpreter applies RELRO (read-only relocations) which changes
-// page attributes AND decoder cache entries. After parent restore,
-// these stale entries cause protection faults we can't easily fix.
-// By making mprotect a no-op for the child, pages stay in their
-// pre-fork state and the parent can resume cleanly.
-static void sys_mprotect(Machine& m) {
-    if (g_fork.in_child) {
-        m.set_result(0);  // skip RELRO during child
+    if (vfd == -1) {
+        // Anonymous mapping: custom bump allocator
+        auto addr_g = m.sysarg(0);
+        auto length = m.sysarg(1);
+        auto prot   = m.template sysarg<int>(2);
+        auto flags  = m.template sysarg<int>(3);
+        constexpr int MAP_FIXED = 0x10;
+        constexpr uint64_t ARENA_LIMIT = (1ULL << riscv::encompassing_Nbit_arena);
+
+        static uint64_t our_bump = 0;
+        if (our_bump == 0) {
+            our_bump = m.memory.mmap_address();
+        }
+
+        uint64_t aligned_len = (length + 4095) & ~4095ULL;
+        uint64_t result;
+
+        if (flags & MAP_FIXED) {
+            result = addr_g;
+        } else if (addr_g != 0 && addr_g >= ARENA_LIMIT) {
+            m.set_result(uint64_t(-12));
+            return;
+        } else {
+            if (our_bump + aligned_len > ARENA_LIMIT) {
+                m.set_result(uint64_t(-12));  // -ENOMEM
+                static int oom_count = 0;
+                if (++oom_count <= 10)
+                    fprintf(stderr, "[mmap-OOM] len=0x%lx bump=0x%lx limit=0x%lx\n",
+                            (long)length, (long)our_bump, (long)ARENA_LIMIT);
+                return;
+            }
+            result = our_bump;
+            our_bump += aligned_len;
+        }
+
+        if (our_bump > m.memory.mmap_address()) {
+            m.memory.mmap_address() = our_bump;
+        }
+
+        if (!(flags & MAP_FIXED)) {
+            if constexpr (riscv::encompassing_Nbit_arena != 0) {
+                auto* arena = (uint8_t*)m.memory.memory_arena_ptr();
+                if (arena && result + aligned_len <= m.memory.memory_arena_size()) {
+                    std::memset(arena + result, 0, aligned_len);
+                } else {
+                    m.memory.memset(result, 0, aligned_len);
+                }
+            } else {
+                m.memory.memset(result, 0, aligned_len);
+            }
+        }
+
+        m.set_result(result);
+
+        static int anon_count = 0;
+        if (++anon_count <= 200)
+            fprintf(stderr, "[mmap-anon] addr=0x%lx len=0x%lx prot=%d flags=0x%x => 0x%lx (bump=0x%lx)\n",
+                    (long)addr_g, (long)length, prot, flags, (long)result, (long)our_bump);
+
+        maybe_preempt(m);
         return;
     }
-    // Main process: apply the real page attribute change.
+
+    // File-backed mapping: use our VFS
+    auto addr_g = m.sysarg(0);
+    auto length = m.sysarg(1);
+    auto prot   = m.template sysarg<int>(2);
+    auto flags  = m.template sysarg<int>(3);
+    auto offset = m.sysarg(5);
+    std::string fd_path = ctx->fs->get_path(vfd);
+    std::cerr << "[mmap] fd=" << vfd << " path=" << fd_path
+              << " addr=0x" << std::hex << addr_g
+              << " len=0x" << length
+              << " prot=" << std::dec << prot
+              << " flags=0x" << std::hex << flags
+              << " off=0x" << offset << std::dec << "\n";
+
+    constexpr int MAP_FIXED = 0x10;
+    constexpr uint64_t PAGE_ALIGN_MASK = 4095;
+
+    if (addr_g % 4096 != 0) {
+        m.set_result(uint64_t(-22));  // -EINVAL
+        return;
+    }
+    length = (length + PAGE_ALIGN_MASK) & ~PAGE_ALIGN_MASK;
+
+    auto entry = ctx->fs->get_entry(vfd);
+    if (!entry || !entry->is_file()) {
+        m.set_result(uint64_t(-9));  // -EBADF
+        return;
+    }
+
+    auto& nextfree = m.memory.mmap_address();
+    uint64_t dst;
+
+    if (addr_g == 0) {
+        if constexpr (riscv::encompassing_Nbit_arena > 0) {
+            if (nextfree + length > riscv::encompassing_arena_mask) {
+                m.set_result(uint64_t(-12));
+                return;
+            }
+        }
+        dst = nextfree;
+        nextfree += length;
+    } else if ((flags & MAP_FIXED) && addr_g < m.memory.mmap_start()) {
+        dst = addr_g;
+    } else if ((flags & MAP_FIXED) && addr_g >= m.memory.mmap_start() && addr_g + length <= nextfree) {
+        dst = addr_g;
+    } else if ((flags & MAP_FIXED) && addr_g >= m.memory.mmap_start()) {
+        if constexpr (riscv::encompassing_Nbit_arena > 0) {
+            uint64_t needed_end = addr_g + length;
+            if (needed_end > riscv::encompassing_arena_mask) {
+                m.set_result(uint64_t(-12));
+                return;
+            }
+        }
+        if (addr_g + length > nextfree)
+            nextfree = addr_g + length;
+        dst = addr_g;
+    } else {
+        dst = addr_g;
+    }
+
+    riscv::PageAttributes rw_attr;
+    rw_attr.read = true;
+    rw_attr.write = true;
+    m.memory.set_page_attr(dst, length, rw_attr);
+
+    m.memory.memdiscard(dst, length, true);
+
+    const auto& content = entry->content;
+    if (offset < content.size()) {
+        size_t avail = content.size() - offset;
+        size_t to_copy = std::min((size_t)length, avail);
+        m.memory.memcpy(dst, content.data() + offset, to_copy);
+    }
+
+    riscv::PageAttributes attr;
+    attr.read  = (prot & 1) != 0;
+    attr.write = (prot & 2) != 0;
+    attr.exec  = (prot & 4) != 0;
+    m.memory.set_page_attr(dst, length, attr);
+
+    m.set_result(dst);
+    std::cerr << "[mmap] => 0x" << std::hex << dst << std::dec
+              << " (nextfree=0x" << std::hex << nextfree << std::dec << ")\n";
+}
+
+// mprotect — apply page attrs for mmap region (thread stacks etc.)
+// No-op for pages below mmap_start to avoid RELRO decoder cache issues.
+static void sys_mprotect(Machine& m) {
     auto addr = m.sysarg(0);
     auto len  = m.sysarg(1);
     auto prot = m.template sysarg<int>(2);
-    riscv::PageAttributes attr;
-    attr.read  = (prot & 1) != 0;  // PROT_READ
-    attr.write = (prot & 2) != 0;  // PROT_WRITE
-    attr.exec  = (prot & 4) != 0;  // PROT_EXEC
-    m.memory.set_page_attr(addr, len, attr);
+
+    static int mprot_count = 0;
+    if (++mprot_count <= 50)
+        fprintf(stderr, "[mprotect] addr=0x%lx len=0x%lx prot=%d pc=0x%lx\n",
+                (long)addr, (long)len, prot, (long)m.cpu.pc());
+
+    if (addr >= m.memory.mmap_start()) {
+        riscv::PageAttributes attr;
+        attr.read = (prot & 1) != 0;
+        attr.write = (prot & 2) != 0;
+        attr.exec = (prot & 4) != 0;
+        m.memory.set_page_attr(addr, len, attr);
+    }
     m.set_result(0);
 }
 
 static void sys_sigaction(Machine& m) { m.set_result(0); }
 static void sys_sigprocmask(Machine& m) { m.set_result(0); }
-static void sys_prlimit64(Machine& m) { m.set_result(0); }
+static void sys_prlimit64(Machine& m) {
+    unsigned int resource = m.template sysarg<unsigned int>(1);
+    auto new_rlim_addr = m.sysarg(2);
+    auto old_rlim_addr = m.sysarg(3);
+
+    constexpr unsigned RLIMIT_NOFILE = 7;
+    constexpr unsigned RLIMIT_STACK  = 3;
+    constexpr unsigned RLIMIT_AS     = 9;
+
+    uint64_t cur = 1024, max = 1024;
+    switch (resource) {
+        case RLIMIT_NOFILE: cur = 1024; max = 1024; break;
+        case RLIMIT_STACK:  cur = 8*1024*1024; max = UINT64_MAX; break;
+        case RLIMIT_AS:     cur = UINT64_MAX; max = UINT64_MAX; break;
+        default:            cur = UINT64_MAX; max = UINT64_MAX; break;
+    }
+
+    if (old_rlim_addr != 0) {
+        m.memory.template write<uint64_t>(old_rlim_addr, cur);
+        m.memory.template write<uint64_t>(old_rlim_addr + 8, max);
+    }
+    (void)new_rlim_addr;
+    m.set_result(0);
+}
+static void sys_getrlimit(Machine& m) {
+    unsigned int resource = m.template sysarg<unsigned int>(0);
+    auto rlim_addr = m.sysarg(1);
+    constexpr unsigned RLIMIT_NOFILE = 7;
+    constexpr unsigned RLIMIT_STACK  = 3;
+    constexpr unsigned RLIMIT_AS     = 9;
+    uint64_t cur = UINT64_MAX, max = UINT64_MAX;
+    switch (resource) {
+        case RLIMIT_NOFILE: cur = 1024; max = 1024; break;
+        case RLIMIT_STACK:  cur = 8*1024*1024; max = UINT64_MAX; break;
+        case RLIMIT_AS:     cur = UINT64_MAX; max = UINT64_MAX; break;
+    }
+    if (rlim_addr != 0) {
+        m.memory.template write<uint64_t>(rlim_addr, cur);
+        m.memory.template write<uint64_t>(rlim_addr + 8, max);
+    }
+    fprintf(stderr, "[getrlimit] resource=%u => cur=%lu max=%lu\n", resource, cur, max);
+    m.set_result(0);
+}
 static void sys_rseq(Machine& m) { m.set_result(err::NOSYS); }
 
 // sendfile(out_fd, in_fd, offset, count) - copy data between fds via VFS
@@ -1205,7 +1790,10 @@ static void sys_ioctl(Machine& m) {
     if (request == 0x5401) {
         if (fd >= 0 && fd <= 2) {
             auto termios_addr = m.sysarg(2);
-            uint8_t termios_buf[60] = {};
+            // struct termios on RISC-V Linux is 44 bytes:
+            //   c_iflag(4) + c_oflag(4) + c_cflag(4) + c_lflag(4)
+            //   + c_line(1) + c_cc[19] + c_ispeed(4) + c_ospeed(4)
+            uint8_t termios_buf[44] = {};
             uint32_t c_iflag = 0;
             uint32_t c_oflag = 0x0005;  // OPOST | ONLCR
             uint32_t c_cflag = 0x00bf;  // CS8 | CREAD | CLOCAL
@@ -1220,8 +1808,7 @@ static void sys_ioctl(Machine& m) {
         }
     }
 
-    // TCSETS/TCSETSW/TCSETSF - set terminal attributes
-    // Accept silently for fd 0, 1, 2 so programs can set raw mode etc.
+    // TCSETS, TCSETSW, TCSETSF - set terminal attributes (accept silently)
     if (request == 0x5402 || request == 0x5403 || request == 0x5404) {
         if (fd >= 0 && fd <= 2) {
             m.set_result(0);
@@ -1229,31 +1816,62 @@ static void sys_ioctl(Machine& m) {
         }
     }
 
-    // TCSETS, TCSETSW, TCSETSF - set terminal attributes (accept silently)
-    if ((request == 0x5402 || request == 0x5403 || request == 0x5404)) {
-        if (fd == 0) {
-            m.set_result(-25);  // -ENOTTY (stdin is not a terminal)
-            return;
-        }
-        if (fd == 1 || fd == 2) {
-            m.set_result(0);
-            return;
-        }
+    // FIONBIO - set non-blocking mode (libuv uses this on pipes/sockets)
+    if (request == 0x5421) {
+        m.set_result(0);
+        return;
     }
 
+    fprintf(stderr, "[ioctl] fd=%d request=0x%lx => -ENOTSUP\n", fd, (long)request);
     m.set_result(err::NOTSUP);
 }
 
 static void sys_fcntl(Machine& m) {
+    auto& fs = get_fs(m);
+    int fd = m.template sysarg<int>(0);
     int cmd = m.template sysarg<int>(1);
-    switch (cmd) {
-        case 1: case 3:  // F_GETFD, F_GETFL
-        case 2: case 4:  // F_SETFD, F_SETFL
-            m.set_result(0);
-            break;
-        default:
-            m.set_result(err::INVAL);
+
+    bool valid = (fd >= 0 && fd <= 2) || fs.is_open(fd);
+    if (!valid) {
+        m.set_result(err::BADF);
+        return;
     }
+
+    constexpr int FCNTL_DUPFD = 0;
+    constexpr int FCNTL_GETFD = 1;
+    constexpr int FCNTL_SETFD = 2;
+    constexpr int FCNTL_GETFL = 3;
+    constexpr int FCNTL_SETFL = 4;
+    constexpr int FCNTL_DUPFD_CLOEXEC = 1030;
+
+    switch (cmd) {
+        case FCNTL_DUPFD:
+        case FCNTL_DUPFD_CLOEXEC: {
+            int newfd = fs.dup(fd);
+            m.set_result(newfd);
+            return;
+        }
+        case FCNTL_GETFD:
+            m.set_result(0);
+            return;
+        case FCNTL_SETFD:
+            m.set_result(0);
+            return;
+        case FCNTL_GETFL:
+            m.set_result((fd == 1 || fd == 2) ? 1 : 0);
+            return;
+        case FCNTL_SETFL:
+            m.set_result(0);
+            return;
+        default:
+            m.set_result(0);
+            return;
+    }
+}
+
+// close_range — bulk close/cloexec file descriptors
+static void sys_close_range(Machine& m) {
+    m.set_result(0);
 }
 
 static void sys_dup(Machine& m) {
@@ -1290,6 +1908,7 @@ static void sys_pipe2(Machine& m) {
 
     int32_t fds[2] = { read_fd, write_fd };
     m.memory.memcpy(pipefd_addr, fds, sizeof(fds));
+    fprintf(stderr, "[pipe2] => read=%d write=%d\n", read_fd, write_fd);
     m.set_result(0);
 }
 
@@ -1547,7 +2166,7 @@ static void sys_sysinfo(Machine& m) {
 static void sys_ppoll(Machine& m) {
     auto fds_addr = m.sysarg(0);
     uint64_t nfds = m.sysarg(1);
-    // args 2,3: timeout (ignored), sigmask (ignored)
+    auto timeout_addr = m.sysarg(2);
 
     if (nfds == 0) {
         m.set_result(0);
@@ -1555,6 +2174,13 @@ static void sys_ppoll(Machine& m) {
     }
     if (nfds > 64) nfds = 64;
 
+    bool has_timeout = (timeout_addr != 0);
+    bool zero_timeout = false;
+    if (has_timeout) {
+        int64_t tv_sec = m.memory.template read<int64_t>(timeout_addr);
+        int64_t tv_nsec = m.memory.template read<int64_t>(timeout_addr + 8);
+        zero_timeout = (tv_sec == 0 && tv_nsec == 0);
+    }
     int ready = 0;
     bool needs_stdin = false;
 
@@ -1582,7 +2208,6 @@ static void sys_ppoll(Machine& m) {
                 ready++;
             }
         } else if (fd >= 0) {
-            // VFS file descriptors are always ready
             revents |= (events & 0x0001); // POLLIN if requested
             if (revents) ready++;
         }
@@ -1592,17 +2217,13 @@ static void sys_ppoll(Machine& m) {
 
     if (ready > 0) {
         m.set_result(ready);
+    } else if (zero_timeout) {
+        m.set_result(0);
     } else if (needs_stdin) {
-        // No data on stdin — stop and let JS resume when data arrives
         android_io::waiting_for_stdin.store(true);
         m.cpu.increment_pc(-4);
         m.stop();
     } else {
-        // Nothing ready and no stdin to wait for.
-        // This happens when the shell polls for signals (SIGCHLD)
-        // after a fork+wait cycle. Without stopping, this creates
-        // a spin loop consuming billions of instructions.
-        // Treat as a stdin-wait so the JS event loop can process.
         android_io::waiting_for_stdin.store(true);
         m.cpu.increment_pc(-4);
         m.stop();
@@ -1624,7 +2245,7 @@ struct EpollInstance {
 
 // Global epoll instances (keyed by epoll fd)
 inline std::unordered_map<int, EpollInstance> g_epoll_instances;
-inline int g_next_epoll_fd = 1000;  // Start high to avoid collisions with VFS fds
+inline int g_next_epoll_fd = 2000;  // Start at 2000 to avoid collision with socket FDs (base 1000)
 
 static void sys_epoll_create1(Machine& m) {
     int fd = g_next_epoll_fd++;
@@ -1692,27 +2313,39 @@ static void sys_epoll_pwait(Machine& m) {
             if (interest.events & 0x04 /*EPOLLOUT*/)
                 revents |= 0x04;
         } else if (fs.is_open(fd)) {
-            // VFS fds: pipes may have data, regular files always ready
             auto entry = fs.get_entry(fd);
             if (entry && entry->type == vfs::FileType::Fifo) {
-                // Pipe: check if data available
                 if ((interest.events & 0x01) && entry->content.size() > 0)
                     revents |= 0x01;
                 if (interest.events & 0x04)
                     revents |= 0x04;
             } else {
-                // Regular file: always ready
                 if (interest.events & 0x01) revents |= 0x01;
                 if (interest.events & 0x04) revents |= 0x04;
             }
         }
+        else if (net_is_socket_fd && net_is_socket_fd(fd)) {
+            int native_fd = net_get_native_fd ? net_get_native_fd(fd) : -1;
+            if (native_fd >= 0) {
+                struct pollfd pfd;
+                pfd.fd = native_fd;
+                pfd.events = 0;
+                if (interest.events & 0x01) pfd.events |= POLLIN;
+                if (interest.events & 0x04) pfd.events |= POLLOUT;
+                pfd.revents = 0;
+                if (::poll(&pfd, 1, 0) > 0) {
+                    if (pfd.revents & POLLIN)  revents |= 0x01;
+                    if (pfd.revents & POLLOUT) revents |= 0x04;
+                    if (pfd.revents & (POLLERR | POLLHUP)) revents |= 0x08;
+                }
+            }
+        }
 
         if (revents) {
-            // struct epoll_event { uint32_t events; [4 pad]; uint64_t data; } = 16 bytes
             uint64_t offset = events_addr + ready * 16;
             m.memory.template write<uint32_t>(offset, revents);
-            m.memory.template write<uint32_t>(offset + 4, 0);  // padding
-            m.memory.template write<uint64_t>(offset + 8, interest.data);  // caller's data
+            m.memory.template write<uint32_t>(offset + 4, 0);
+            m.memory.template write<uint64_t>(offset + 8, interest.data);
             ready++;
         }
     }
@@ -1720,11 +2353,48 @@ static void sys_epoll_pwait(Machine& m) {
     if (ready > 0) {
         m.set_result(ready);
     } else if (timeout == 0) {
-        // Non-blocking poll, nothing ready
         m.set_result(0);
     } else {
-        // Nothing ready, timeout > 0 or -1 (infinite).
-        // Yield to JS event loop so stdin data / timers can arrive.
+        // Native mode: collect socket fds and do a blocking poll
+        std::vector<struct pollfd> pfds;
+        std::vector<std::pair<int, EpollInterest*>> pfd_map;
+        for (auto& [fd2, interest2] : it->second.interests) {
+            if (net_is_socket_fd && net_is_socket_fd(fd2)) {
+                int native_fd = net_get_native_fd ? net_get_native_fd(fd2) : -1;
+                if (native_fd >= 0) {
+                    struct pollfd pfd;
+                    pfd.fd = native_fd;
+                    pfd.events = 0;
+                    if (interest2.events & 0x01) pfd.events |= POLLIN;
+                    if (interest2.events & 0x04) pfd.events |= POLLOUT;
+                    pfd.revents = 0;
+                    pfds.push_back(pfd);
+                    pfd_map.push_back({fd2, &interest2});
+                }
+            }
+        }
+        if (!pfds.empty()) {
+            int poll_timeout = timeout;
+            int ret = ::poll(pfds.data(), pfds.size(), poll_timeout);
+            if (ret > 0) {
+                for (size_t i = 0; i < pfds.size() && ready < maxevents; i++) {
+                    uint32_t revents2 = 0;
+                    if (pfds[i].revents & POLLIN)  revents2 |= 0x01;
+                    if (pfds[i].revents & POLLOUT) revents2 |= 0x04;
+                    if (pfds[i].revents & (POLLERR | POLLHUP)) revents2 |= 0x08;
+                    if (revents2) {
+                        uint64_t offset = events_addr + ready * 16;
+                        m.memory.template write<uint32_t>(offset, revents2);
+                        m.memory.template write<uint32_t>(offset + 4, 0);
+                        m.memory.template write<uint64_t>(offset + 8, pfd_map[i].second->data);
+                        ready++;
+                    }
+                }
+            }
+            m.set_result(ready);
+            return;
+        }
+        // Nothing ready, no sockets to poll — yield
         android_io::waiting_for_stdin.store(true);
         m.cpu.increment_pc(-4);
         m.stop();
@@ -1732,14 +2402,13 @@ static void sys_epoll_pwait(Machine& m) {
 }
 
 // ============================================================================
-// futex — thread synchronization (single-threaded: mostly no-ops)
+// futex — thread synchronization with cooperative scheduling
 // ============================================================================
 
 static void sys_futex(Machine& m) {
     auto uaddr = m.sysarg(0);
     int op = m.template sysarg<int>(1);
 
-    // Mask off FUTEX_PRIVATE_FLAG (128) and FUTEX_CLOCK_REALTIME (256)
     int cmd = op & 0x7f;
 
     constexpr int FUTEX_WAIT = 0;
@@ -1748,19 +2417,53 @@ static void sys_futex(Machine& m) {
     constexpr int FUTEX_WAKE_BITSET = 10;
 
     if (cmd == FUTEX_WAIT || cmd == FUTEX_WAIT_BITSET) {
-        // Check if futex word matches expected value
         int32_t expected = m.template sysarg<int>(2);
         int32_t actual = m.memory.template read<int32_t>(uaddr);
         if (actual != expected) {
             m.set_result(-11);  // -EAGAIN
-        } else {
-            // Single-threaded: no one will wake us. Return -ETIMEDOUT
-            // to avoid infinite wait. Caller retries the operation.
-            m.set_result(-110);  // -ETIMEDOUT
+            return;
         }
-    } else if (cmd == FUTEX_WAKE || cmd == FUTEX_WAKE_BITSET) {
-        // Single-threaded: no waiters to wake
+
+        // Cooperative scheduling: if another thread is runnable, switch to it.
+        if (g_sched.count > 1) {
+            auto& cur = g_sched.threads[g_sched.current];
+            cur.waiting = true;
+            cur.futex_addr = uaddr;
+            cur.futex_val = expected;
+            m.set_result(0);
+
+            int next = g_sched.next_runnable(g_sched.current);
+            if (next >= 0) {
+                static int switch_count = 0;
+                if (++switch_count <= 20)
+                    fprintf(stderr, "[futex] WAIT switch t%d->t%d addr=0x%lx exp=0x%x\n",
+                            g_sched.current, next, (long)uaddr, (unsigned)expected);
+                switch_to_thread(m, next);
+                return;
+            }
+            cur.waiting = false;
+        }
+
+        // Fallback: no cooperative threads. Write 0 to break spin loops.
+        m.memory.template write<int32_t>(uaddr, 0);
+        static int futex_wait_count = 0;
+        if (++futex_wait_count <= 20) {
+            fprintf(stderr, "[futex] WAIT fallback addr=0x%lx exp=0x%x\n",
+                    (long)uaddr, (unsigned)expected);
+        }
         m.set_result(0);
+
+    } else if (cmd == FUTEX_WAKE || cmd == FUTEX_WAKE_BITSET) {
+        int max_wake = m.template sysarg<int>(2);
+        int woken = g_sched.wake(uaddr, max_wake);
+
+        if (woken > 0) {
+            static int wake_count = 0;
+            if (++wake_count <= 20)
+                fprintf(stderr, "[futex] WAKE addr=0x%lx woke=%d\n",
+                        (long)uaddr, woken);
+        }
+        m.set_result(woken);
     } else {
         m.set_result(-38);  // -ENOSYS for other futex ops
     }
@@ -1902,6 +2605,15 @@ static void sys_nanosleep(Machine& m) {
     int ms = static_cast<int>(tv_sec * 1000 + tv_nsec / 1000000);
     if (ms < 1) ms = 1;
 
+    // Cooperative scheduling: nanosleep is a natural yield point
+    if (g_sched.count > 1) {
+        int next = g_sched.next_runnable(g_sched.current);
+        if (next >= 0) {
+            switch_to_thread(m, next);
+            return;
+        }
+    }
+
     usleep(static_cast<useconds_t>(ms) * 1000);
     m.set_result(0);
 }
@@ -1910,10 +2622,29 @@ static void sys_nanosleep(Machine& m) {
 // Stubs — safe no-ops or ENOSYS returns
 // ============================================================================
 
-static void sys_madvise(Machine& m) { m.set_result(0); }
+static void sys_madvise(Machine& m) {
+    auto addr = m.sysarg(0);
+    auto len = m.sysarg(1);
+    auto advice = m.template sysarg<int>(2);
+    static int madvise_count = 0;
+    if (++madvise_count <= 200)
+        fprintf(stderr, "[madvise] addr=0x%lx len=0x%lx advice=%d pc=0x%lx\n",
+                (long)addr, (long)len, advice, (long)m.cpu.pc());
+    m.set_result(0);
+}
 static void sys_prctl(Machine& m) { m.set_result(0); }
 static void sys_mremap(Machine& m) { m.set_result(err::NOSYS); }
-static void sys_eventfd2(Machine& m) { m.set_result(err::NOSYS); }
+static void sys_eventfd2(Machine& m) {
+    auto& fs = get_fs(m);
+    auto entry = std::make_shared<vfs::Entry>();
+    entry->type = vfs::FileType::Regular;
+    entry->mode = 0600;
+    entry->size = 0;
+    entry->content.resize(8, 0);
+    int fd = fs.open_pipe(entry, 0);
+    fprintf(stderr, "[eventfd2] => fd=%d\n", fd);
+    m.set_result(fd);
+}
 static void sys_io_uring_setup(Machine& m) { m.set_result(err::NOSYS); }
 static void sys_capget(Machine& m) { m.set_result(-1); }  // -EPERM
 
@@ -2076,7 +2807,199 @@ static void sys_recvmsg(Machine& m) {
     m.set_result(total);
 }
 
+// ============================================================================
+// Round 3: Go echo + Next.js build gaps
+// ============================================================================
+
+static void sys_flock(Machine& m) { m.set_result(0); }
+static void sys_fsync(Machine& m) { m.set_result(0); }
+
+static void sys_fchmod(Machine& m) {
+    auto& fs = get_fs(m);
+    int fd = m.template sysarg<int>(0);
+    uint32_t mode = m.template sysarg<uint32_t>(1);
+    auto entry = fs.get_entry(fd);
+    if (!entry) { m.set_result(err::BADF); return; }
+    entry->mode = mode & 07777;
+    m.set_result(0);
+}
+
+static void sys_fchmodat(Machine& m) {
+    auto& fs = get_fs(m);
+    int dirfd = m.template sysarg<int>(0);
+    auto path_addr = m.sysarg(1);
+    uint32_t mode = m.template sysarg<uint32_t>(2);
+    if (dirfd != AT_FDCWD) { m.set_result(err::NOTSUP); return; }
+    std::string path;
+    try { path = m.memory.memstring(path_addr); }
+    catch (...) { m.set_result(err::INVAL); return; }
+    auto entry = fs.resolve(path);
+    if (!entry) { m.set_result(err::NOENT); return; }
+    entry->mode = mode & 07777;
+    m.set_result(0);
+}
+
+static void sys_fchownat(Machine& m) { m.set_result(0); }
+static void sys_getgroups(Machine& m) { m.set_result(0); }
+
+static void sys_kill(Machine& m) {
+    int pid = m.template sysarg<int>(0);
+    int sig = m.template sysarg<int>(1);
+    if (pid <= 1 || pid == 100) {
+        m.set_result(0);
+    } else {
+        m.set_result(-3);  // -ESRCH
+    }
+}
+
+static void sys_tkill(Machine& m) {
+    int sig = m.template sysarg<int>(1);
+    if (sig == 6) { // SIGABRT
+        fprintf(stderr, "[ABORT] tkill(SIGABRT)! PC=0x%lx RA=0x%lx SP=0x%lx\n",
+                (long)m.cpu.pc(), (long)m.cpu.reg(1), (long)m.cpu.reg(2));
+    }
+    m.set_result(0);
+}
+
+static void sys_sched_yield(Machine& m) {
+    m.set_result(0);
+    if (g_sched.count > 1) {
+        int next = g_sched.next_runnable(g_sched.current);
+        if (next >= 0) {
+            switch_to_thread(m, next);
+        }
+    }
+}
+
+static void sys_rt_sigreturn(Machine& m) { m.set_result(0); }
+
+static void sys_pwritev(Machine& m) {
+    auto& fs = get_fs(m);
+    int fd = m.template sysarg<int>(0);
+    auto iov_addr = m.sysarg(1);
+    int iovcnt = m.template sysarg<int>(2);
+    int64_t offset = m.template sysarg<int64_t>(3);
+
+    std::vector<uint8_t> combined;
+    for (int i = 0; i < iovcnt && i < 16; i++) {
+        uint64_t base = m.memory.template read<uint64_t>(iov_addr + i * 16);
+        uint64_t len  = m.memory.template read<uint64_t>(iov_addr + i * 16 + 8);
+        if (len > 0) {
+            size_t prev = combined.size();
+            combined.resize(prev + len);
+            m.memory.memcpy_out(combined.data() + prev, base, len);
+        }
+    }
+
+    if (combined.empty()) { m.set_result(0); return; }
+    ssize_t n = fs.pwrite(fd, combined.data(), combined.size(), offset);
+    m.set_result(n);
+}
+
+static void sys_socketpair(Machine& m) {
+    auto& fs = get_fs(m);
+    auto sv_addr = m.sysarg(3);
+
+    auto pipe_a = std::make_shared<vfs::Entry>();
+    pipe_a->type = vfs::FileType::Fifo;
+    pipe_a->mode = 0600;
+    pipe_a->size = 0;
+
+    auto pipe_b = std::make_shared<vfs::Entry>();
+    pipe_b->type = vfs::FileType::Fifo;
+    pipe_b->mode = 0600;
+    pipe_b->size = 0;
+
+    int fd0_read = fs.open_pipe(pipe_a, 0);
+    int fd0_write = fs.open_pipe(pipe_b, 1);
+    int fd1_read = fs.open_pipe(pipe_b, 0);
+    int fd1_write = fs.open_pipe(pipe_a, 1);
+
+    fs.close(fd0_write);
+    fs.close(fd1_read);
+
+    int32_t sv[2] = { fd1_write, fd0_read };
+    m.memory.memcpy(sv_addr, sv, sizeof(sv));
+    m.set_result(0);
+}
+
+static void sys_sendmsg(Machine& m) {
+    int fd = m.template sysarg<int>(0);
+    auto msghdr_addr = m.sysarg(1);
+    auto& fs = get_fs(m);
+
+    auto iov_addr = m.memory.template read<uint64_t>(msghdr_addr + 16);
+    auto iovlen   = m.memory.template read<uint64_t>(msghdr_addr + 24);
+
+    size_t total = 0;
+    for (uint64_t i = 0; i < iovlen && i < 16; i++) {
+        uint64_t base = m.memory.template read<uint64_t>(iov_addr + i * 16);
+        uint64_t len  = m.memory.template read<uint64_t>(iov_addr + i * 16 + 8);
+        if (len > 0) {
+            std::vector<uint8_t> buf(len);
+            m.memory.memcpy_out(buf.data(), base, len);
+            ssize_t n = fs.write(fd, buf.data(), len);
+            if (n < 0) {
+                m.set_result(total > 0 ? (int64_t)total : n);
+                return;
+            }
+            total += n;
+            if (static_cast<size_t>(n) < len) break;
+        }
+    }
+    m.set_result(total);
+}
+
 }  // namespace handlers
+
+// Custom brk handler: after execve, libriscv's m_heap_address is stale.
+static void sys_brk(Machine& m) {
+    auto new_end = m.sysarg(0);
+
+    if (!g_exec_ctx.brk_overridden) {
+        uint64_t heap_addr = m.memory.heap_address();
+        constexpr uint64_t BRK_MAX = 16ULL << 20;
+        if (new_end > heap_addr + BRK_MAX) {
+            new_end = heap_addr + BRK_MAX;
+        } else if (new_end < heap_addr) {
+            new_end = heap_addr;
+        }
+        m.set_result(new_end);
+        return;
+    }
+
+    constexpr uint64_t BRK_MAX = 16ULL << 20;
+    if (new_end == 0 || new_end < g_exec_ctx.brk_base) {
+        new_end = g_exec_ctx.brk_current;
+    } else if (new_end > g_exec_ctx.brk_base + BRK_MAX) {
+        new_end = g_exec_ctx.brk_base + BRK_MAX;
+    }
+
+    if (new_end > g_exec_ctx.brk_current) {
+        uint64_t start = g_exec_ctx.brk_current;
+        uint64_t len = new_end - start;
+        riscv::PageAttributes rw;
+        rw.read = true; rw.write = true;
+        m.memory.set_page_attr(start, len, rw);
+    }
+
+    g_exec_ctx.brk_current = new_end;
+    m.set_result(new_end);
+}
+
+// Round 4: Node.js startup syscalls
+namespace nr {
+    constexpr int getsockopt     = 209;
+    constexpr int riscv_hwprobe  = 258;
+}
+
+static void sys_getsockopt(Machine& m) {
+    m.set_result(-88);  // -ENOTSOCK
+}
+
+static void sys_riscv_hwprobe(Machine& m) {
+    m.set_result(-38);  // -ENOSYS
+}
 
 // Install all syscall handlers
 inline void install_syscalls(Machine& machine, vfs::VirtualFS& fs) {
@@ -2087,7 +3010,7 @@ inline void install_syscalls(Machine& machine, vfs::VirtualFS& fs) {
     // Install handlers
     using namespace handlers;
     machine.install_syscall_handler(nr::exit, sys_exit);
-    machine.install_syscall_handler(nr::exit_group, sys_exit);
+    machine.install_syscall_handler(nr::exit_group, sys_exit_group);
     machine.install_syscall_handler(nr::openat, sys_openat);
     machine.install_syscall_handler(nr::close, sys_close);
     machine.install_syscall_handler(nr::read, sys_read);
@@ -2115,13 +3038,17 @@ inline void install_syscalls(Machine& machine, vfs::VirtualFS& fs) {
     machine.install_syscall_handler(nr::clone, sys_clone);
     machine.install_syscall_handler(nr::execve, sys_execve);
     machine.install_syscall_handler(nr::wait4, sys_wait4);
-    // brk, mmap, munmap: handled by libriscv (do not override)
-    // mprotect: override to no-op during child execution (prevent RELRO
-    // from poisoning decoder cache / page attrs during fork cycle)
+    // brk: override to handle post-execve memory layout changes
+    machine.install_syscall_handler(nr::brk, sys_brk);
+    // mmap: override to handle file-backed mappings via VFS + custom bump allocator
+    libriscv_mmap_handler = Machine::syscall_handlers[nr::mmap];
+    machine.install_syscall_handler(nr::mmap, sys_mmap);
+    // mprotect: override for thread stacks + RELRO safety
     machine.install_syscall_handler(nr::mprotect, sys_mprotect);
     machine.install_syscall_handler(nr::sigaction, sys_sigaction);
     machine.install_syscall_handler(nr::sigprocmask, sys_sigprocmask);
     machine.install_syscall_handler(nr::prlimit64, sys_prlimit64);
+    machine.install_syscall_handler(nr::getrlimit, sys_getrlimit);
     machine.install_syscall_handler(nr::rseq, sys_rseq);
     machine.install_syscall_handler(nr::ioctl, sys_ioctl);
     machine.install_syscall_handler(nr::fcntl, sys_fcntl);
@@ -2179,6 +3106,27 @@ inline void install_syscalls(Machine& machine, vfs::VirtualFS& fs) {
     machine.install_syscall_handler(nr::membarrier, sys_membarrier);
     machine.install_syscall_handler(nr::faccessat2, sys_faccessat2);
     machine.install_syscall_handler(nr::recvmsg, sys_recvmsg);
+
+    // Round 3: Go echo + Next.js build
+    machine.install_syscall_handler(nr::flock, sys_flock);
+    machine.install_syscall_handler(nr::fsync, sys_fsync);
+    machine.install_syscall_handler(nr::fchmod, sys_fchmod);
+    machine.install_syscall_handler(nr::fchmodat, sys_fchmodat);
+    machine.install_syscall_handler(nr::fchownat, sys_fchownat);
+    machine.install_syscall_handler(nr::getgroups, sys_getgroups);
+    machine.install_syscall_handler(nr::kill, sys_kill);
+    machine.install_syscall_handler(nr::tkill, sys_tkill);
+    machine.install_syscall_handler(nr::tgkill, sys_tkill);  // same as tkill
+    machine.install_syscall_handler(nr::sched_yield, sys_sched_yield);
+    machine.install_syscall_handler(nr::close_range, sys_close_range);
+    machine.install_syscall_handler(nr::rt_sigreturn, sys_rt_sigreturn);
+    machine.install_syscall_handler(nr::pwritev, sys_pwritev);
+    machine.install_syscall_handler(nr::socketpair, sys_socketpair);
+    machine.install_syscall_handler(nr::sendmsg, sys_sendmsg);
+
+    // Round 4: Node.js startup
+    machine.install_syscall_handler(nr::getsockopt, sys_getsockopt);
+    machine.install_syscall_handler(nr::riscv_hwprobe, sys_riscv_hwprobe);
 }
 
 }  // namespace syscalls

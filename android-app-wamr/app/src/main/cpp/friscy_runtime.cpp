@@ -399,6 +399,20 @@ Java_com_example_c2wdemo_FriscyRuntime_nativeLoadRootfs(
         // Install network syscall handlers (real POSIX sockets via Android)
         net::install_network_syscalls(*g_machine);
 
+        // Wire up network bridge function pointers for syscalls.hpp
+        // (syscalls.hpp uses these to delegate socket I/O without including network.hpp)
+        syscalls::net_is_socket_fd = [](int fd) -> bool {
+            return net::get_network_ctx().is_socket_fd(fd);
+        };
+        syscalls::net_get_native_fd = [](int fd) -> int {
+            return net::get_network_ctx().get_native_fd(fd);
+        };
+
+        // Initialize cooperative thread scheduler (for CLONE_THREAD support)
+        syscalls::g_sched = {};
+        syscalls::g_fork = {};
+        syscalls::g_next_pid = 100;
+
         // Environment variables
         std::vector<std::string> guest_env = {
             "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -537,8 +551,13 @@ Java_com_example_c2wdemo_FriscyRuntime_nativeDestroy(JNIEnv* env, jclass clazz) 
     g_machine.reset();
     g_vfs.reset();
 
-    // Clear exec context
+    // Clear exec context and thread state
     syscalls::g_exec_ctx = {};
+    syscalls::g_sched = {};
+    syscalls::g_fork = {};
+    syscalls::g_next_pid = 100;
+    syscalls::net_is_socket_fd = nullptr;
+    syscalls::net_get_native_fd = nullptr;
 
     // Clear callback
     {

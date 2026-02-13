@@ -5,157 +5,172 @@
     android:layout_height="match_parent"
     android:background="#0D0D1A">
 
-    <!-- Zim frame background (extends edge to edge behind system bars) -->
+    <!-- Stat rail "book spine" — revealed during predictive back gesture -->
+    <androidx.compose.ui.platform.ComposeView
+        android:id="@+id/statRailView"
+        android:layout_width="48dp"
+        android:layout_height="match_parent"
+        android:visibility="gone" />
+
+    <!-- Book cover: rotates around left edge during back gesture -->
     <FrameLayout
+        android:id="@+id/bookCover"
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:layout_margin="8dp"
-        android:background="@drawable/invader_zim_frame">
+        android:layout_height="match_parent">
 
-        <!-- KIOSK RUNTIME header embedded in top frame -->
-        <TextView
+        <!-- Zim frame background (extends edge to edge behind system bars) -->
+        <FrameLayout
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:fontFamily="monospace"
-            android:gravity="center"
-            android:letterSpacing="0.2"
-            android:paddingTop="6dp"
-            android:paddingBottom="4dp"
-            android:text="KIOSK RUNTIME"
-            android:textColor="#C77DFF"
-            android:textSize="12sp"
-            android:textStyle="bold" />
+            android:layout_height="match_parent"
+            android:layout_margin="8dp"
+            android:background="@drawable/invader_zim_frame">
 
-        <!-- Strategic accent lights -->
-        <View
-            android:layout_width="20dp"
-            android:layout_height="20dp"
-            android:layout_gravity="top|start"
-            android:layout_marginTop="20dp"
-            android:layout_marginStart="20dp"
-            android:background="@drawable/glow_accent_pink" />
+            <!-- KIOSK RUNTIME header embedded in top frame -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:fontFamily="monospace"
+                android:gravity="center"
+                android:letterSpacing="0.2"
+                android:paddingTop="6dp"
+                android:paddingBottom="4dp"
+                android:text="KIOSK RUNTIME"
+                android:textColor="#C77DFF"
+                android:textSize="12sp"
+                android:textStyle="bold" />
 
-        <View
-            android:layout_width="16dp"
-            android:layout_height="16dp"
-            android:layout_gravity="top|end"
-            android:layout_marginTop="18dp"
-            android:layout_marginEnd="24dp"
-            android:background="@drawable/glow_accent_cyan" />
+            <!-- Strategic accent lights -->
+            <View
+                android:layout_width="20dp"
+                android:layout_height="20dp"
+                android:layout_gravity="top|start"
+                android:layout_marginTop="20dp"
+                android:layout_marginStart="20dp"
+                android:background="@drawable/glow_accent_pink" />
 
-        <View
-            android:layout_width="12dp"
-            android:layout_height="12dp"
-            android:layout_gravity="top|end"
-            android:layout_marginTop="36dp"
-            android:layout_marginEnd="20dp"
-            android:background="@drawable/glow_accent_pink" />
+            <View
+                android:layout_width="16dp"
+                android:layout_height="16dp"
+                android:layout_gravity="top|end"
+                android:layout_marginTop="18dp"
+                android:layout_marginEnd="24dp"
+                android:background="@drawable/glow_accent_cyan" />
 
-        <View
-            android:layout_width="24dp"
-            android:layout_height="24dp"
-            android:layout_gravity="bottom|start"
-            android:layout_marginBottom="80dp"
-            android:layout_marginStart="18dp"
-            android:background="@drawable/glow_accent_pink" />
+            <View
+                android:layout_width="12dp"
+                android:layout_height="12dp"
+                android:layout_gravity="top|end"
+                android:layout_marginTop="36dp"
+                android:layout_marginEnd="20dp"
+                android:background="@drawable/glow_accent_pink" />
 
-        <!-- Zim status gauge: embedded in right frame edge -->
-        <androidx.compose.ui.platform.ComposeView
-            android:id="@+id/statusGauge"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center_vertical|end"
-            android:layout_marginEnd="2dp" />
+            <View
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:layout_gravity="bottom|start"
+                android:layout_marginBottom="80dp"
+                android:layout_marginStart="18dp"
+                android:background="@drawable/glow_accent_pink" />
+
+            <!-- Zim status gauge: embedded in right frame edge -->
+            <androidx.compose.ui.platform.ComposeView
+                android:id="@+id/statusGauge"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_vertical|end"
+                android:layout_marginEnd="2dp" />
+        </FrameLayout>
+
+        <!-- Content root: InsetsAnimationLinearLayout for IME control via nested scrolling -->
+        <com.example.c2wdemo.ime.InsetsAnimationLinearLayout
+            android:id="@+id/contentRoot"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_margin="8dp"
+            android:clipToPadding="false"
+            android:orientation="vertical"
+            android:padding="24dp">
+
+            <!-- Terminal area: FriscyTerminalView with proper VT100 rendering -->
+            <com.example.c2wdemo.terminal.FriscyTerminalView
+                android:id="@+id/terminalView"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:background="#0A0A14"
+                android:padding="4dp" />
+
+            <!-- Zim helper bar: terminal shortcut keys, shown when keyboard is open -->
+            <LinearLayout
+                android:id="@+id/zimHelperBar"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="@drawable/zim_helper_bar_bg"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingHorizontal="4dp"
+                android:paddingVertical="6dp"
+                android:visibility="gone">
+
+                <TextView
+                    android:id="@+id/btnCtrl"
+                    android:layout_width="0dp"
+                    android:layout_height="36dp"
+                    android:layout_marginEnd="4dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/zim_key_bg"
+                    android:fontFamily="monospace"
+                    android:gravity="center"
+                    android:text="CTRL"
+                    android:textColor="#00FFFF"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/btnPrevWord"
+                    android:layout_width="0dp"
+                    android:layout_height="36dp"
+                    android:layout_marginEnd="4dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/zim_key_bg"
+                    android:fontFamily="monospace"
+                    android:gravity="center"
+                    android:text="&#9664;W"
+                    android:textColor="#00FFFF"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/btnNextWord"
+                    android:layout_width="0dp"
+                    android:layout_height="36dp"
+                    android:layout_marginEnd="4dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/zim_key_bg"
+                    android:fontFamily="monospace"
+                    android:gravity="center"
+                    android:text="W&#9654;"
+                    android:textColor="#00FFFF"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/btnUp"
+                    android:layout_width="0dp"
+                    android:layout_height="36dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/zim_key_bg"
+                    android:fontFamily="monospace"
+                    android:gravity="center"
+                    android:text="&#9650;"
+                    android:textColor="#00FFFF"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+
+            </LinearLayout>
+
+        </com.example.c2wdemo.ime.InsetsAnimationLinearLayout>
+
     </FrameLayout>
-
-    <!-- Content root: InsetsAnimationLinearLayout for IME control via nested scrolling -->
-    <com.example.c2wdemo.ime.InsetsAnimationLinearLayout
-        android:id="@+id/contentRoot"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:layout_margin="8dp"
-        android:clipToPadding="false"
-        android:orientation="vertical"
-        android:padding="24dp">
-
-        <!-- Terminal area: FriscyTerminalView with proper VT100 rendering -->
-        <com.example.c2wdemo.terminal.FriscyTerminalView
-            android:id="@+id/terminalView"
-            android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_weight="1"
-            android:background="#0A0A14"
-            android:padding="4dp" />
-
-        <!-- Zim helper bar: terminal shortcut keys, shown when keyboard is open -->
-        <LinearLayout
-            android:id="@+id/zimHelperBar"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:background="@drawable/zim_helper_bar_bg"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:paddingHorizontal="4dp"
-            android:paddingVertical="6dp"
-            android:visibility="gone">
-
-            <TextView
-                android:id="@+id/btnCtrl"
-                android:layout_width="0dp"
-                android:layout_height="36dp"
-                android:layout_marginEnd="4dp"
-                android:layout_weight="1"
-                android:background="@drawable/zim_key_bg"
-                android:fontFamily="monospace"
-                android:gravity="center"
-                android:text="CTRL"
-                android:textColor="#00FFFF"
-                android:textSize="12sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/btnPrevWord"
-                android:layout_width="0dp"
-                android:layout_height="36dp"
-                android:layout_marginEnd="4dp"
-                android:layout_weight="1"
-                android:background="@drawable/zim_key_bg"
-                android:fontFamily="monospace"
-                android:gravity="center"
-                android:text="&#9664;W"
-                android:textColor="#00FFFF"
-                android:textSize="12sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/btnNextWord"
-                android:layout_width="0dp"
-                android:layout_height="36dp"
-                android:layout_marginEnd="4dp"
-                android:layout_weight="1"
-                android:background="@drawable/zim_key_bg"
-                android:fontFamily="monospace"
-                android:gravity="center"
-                android:text="W&#9654;"
-                android:textColor="#00FFFF"
-                android:textSize="12sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/btnUp"
-                android:layout_width="0dp"
-                android:layout_height="36dp"
-                android:layout_weight="1"
-                android:background="@drawable/zim_key_bg"
-                android:fontFamily="monospace"
-                android:gravity="center"
-                android:text="&#9650;"
-                android:textColor="#00FFFF"
-                android:textSize="12sp"
-                android:textStyle="bold" />
-
-        </LinearLayout>
-
-    </com.example.c2wdemo.ime.InsetsAnimationLinearLayout>
 
 </FrameLayout>

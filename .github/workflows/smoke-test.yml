@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   build:
-    name: Build APK
+    name: Build APKs
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -59,9 +59,9 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Build APK
+      - name: Build debug + test APKs
         working-directory: android-app-wamr
-        run: chmod +x ./gradlew && ./gradlew :app:assembleDebug --no-daemon
+        run: chmod +x ./gradlew && ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest --no-daemon
 
       - name: Verify native lib in APK
         run: |
@@ -76,6 +76,11 @@ jobs:
           name: smoke-apk
           path: android-app-wamr/app/build/outputs/apk/debug/*.apk
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test-apk
+          path: android-app-wamr/app/build/outputs/apk/androidTest/debug/*.apk
+
   smoke:
     needs: build
     uses: maceip/.github/.github/workflows/smoke-test.yml@main
@@ -83,3 +88,59 @@ jobs:
       apk-artifact-name: smoke-apk
       package-name: com.example.c2wdemo.wamr
       main-activity: com.example.c2wdemo.ImagePickerActivity
+
+  instrumented-test:
+    name: Instrumented Runtime Tests
+    needs: [build, smoke]
+    runs-on: self-hosted
+    concurrency: emulator
+    env:
+      ANDROID_HOME: /opt/android-sdk
+    steps:
+      - name: Add platform-tools to PATH
+        run: echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: smoke-apk
+          path: apk
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: test-apk
+          path: test-apk
+
+      - name: Wait for device
+        run: adb wait-for-device && adb shell getprop ro.build.version.sdk
+        timeout-minutes: 2
+
+      - name: Install app APK
+        run: adb install -r apk/*.apk
+
+      - name: Install test APK
+        run: adb install -r test-apk/*.apk
+
+      - name: Run instrumented tests
+        run: |
+          adb shell am instrument -w \
+            -e class com.example.c2wdemo.FriscyRuntimeInstrumentationTest \
+            com.example.c2wdemo.wamr.test/androidx.test.runner.AndroidJUnitRunner \
+            | tee test-output.txt
+
+          # Fail if any test failed or the runner errored
+          if grep -q 'FAILURES!!!' test-output.txt; then
+            echo "::error::Instrumented tests failed"
+            exit 1
+          fi
+          if grep -q 'INSTRUMENTATION_STATUS_CODE: -1' test-output.txt; then
+            echo "::error::One or more tests failed"
+            exit 1
+          fi
+          echo "All instrumented tests passed"
+        timeout-minutes: 5
+
+      - name: Uninstall test packages
+        if: always()
+        run: |
+          adb uninstall com.example.c2wdemo.wamr.test || true
+          adb uninstall com.example.c2wdemo.wamr || true
