@@ -382,8 +382,12 @@ inline vfs::VirtualFS& get_fs(Machine& m) {
     return *get_ctx(m)->fs;
 }
 
-// Saved reference to libriscv's built-in mmap handler.
+// Saved references to libriscv's built-in handlers (for forwarding).
 inline Machine::syscall_t libriscv_mmap_handler = nullptr;
+inline Machine::syscall_t libriscv_brk_handler = nullptr;
+
+// Mmap bump allocator pointer (reset on each machine init).
+inline uint64_t g_mmap_bump = 0;
 
 // Syscall handlers (static functions, no captures)
 namespace handlers {
@@ -1509,64 +1513,15 @@ static void sys_mmap(Machine& m) {
     int vfd = m.template sysarg<int>(4);
 
     if (vfd == -1) {
-        // Anonymous mapping: custom bump allocator
-        auto addr_g = m.sysarg(0);
-        auto length = m.sysarg(1);
-        auto prot   = m.template sysarg<int>(2);
-        auto flags  = m.template sysarg<int>(3);
-        constexpr int MAP_FIXED = 0x10;
-        constexpr uint64_t ARENA_LIMIT = (1ULL << riscv::encompassing_Nbit_arena);
-
-        static uint64_t our_bump = 0;
-        if (our_bump == 0) {
-            our_bump = m.memory.mmap_address();
-        }
-
-        uint64_t aligned_len = (length + 4095) & ~4095ULL;
-        uint64_t result;
-
-        if (flags & MAP_FIXED) {
-            result = addr_g;
-        } else if (addr_g != 0 && addr_g >= ARENA_LIMIT) {
-            m.set_result(uint64_t(-12));
-            return;
+        // Anonymous mapping: forward to libriscv's built-in handler.
+        // Our custom bump allocator only works with encompassing arena mode,
+        // but we use RISCV_FLAT_RW_ARENA without RISCV_ENCOMPASSING_ARENA,
+        // so libriscv's built-in mmap_allocate is the correct path.
+        if (libriscv_mmap_handler) {
+            libriscv_mmap_handler(m);
         } else {
-            if (our_bump + aligned_len > ARENA_LIMIT) {
-                m.set_result(uint64_t(-12));  // -ENOMEM
-                static int oom_count = 0;
-                if (++oom_count <= 10)
-                    fprintf(stderr, "[mmap-OOM] len=0x%lx bump=0x%lx limit=0x%lx\n",
-                            (long)length, (long)our_bump, (long)ARENA_LIMIT);
-                return;
-            }
-            result = our_bump;
-            our_bump += aligned_len;
+            m.set_result(uint64_t(-12));  // -ENOMEM
         }
-
-        if (our_bump > m.memory.mmap_address()) {
-            m.memory.mmap_address() = our_bump;
-        }
-
-        if (!(flags & MAP_FIXED)) {
-            if constexpr (riscv::encompassing_Nbit_arena != 0) {
-                auto* arena = (uint8_t*)m.memory.memory_arena_ptr();
-                if (arena && result + aligned_len <= m.memory.memory_arena_size()) {
-                    std::memset(arena + result, 0, aligned_len);
-                } else {
-                    m.memory.memset(result, 0, aligned_len);
-                }
-            } else {
-                m.memory.memset(result, 0, aligned_len);
-            }
-        }
-
-        m.set_result(result);
-
-        static int anon_count = 0;
-        if (++anon_count <= 200)
-            fprintf(stderr, "[mmap-anon] addr=0x%lx len=0x%lx prot=%d flags=0x%x => 0x%lx (bump=0x%lx)\n",
-                    (long)addr_g, (long)length, prot, flags, (long)result, (long)our_bump);
-
         maybe_preempt(m);
         return;
     }
@@ -2957,6 +2912,13 @@ static void sys_brk(Machine& m) {
     auto new_end = m.sysarg(0);
 
     if (!g_exec_ctx.brk_overridden) {
+        // Forward to libriscv's built-in brk handler which properly manages
+        // heap memory (page allocation, heap pointer tracking, etc.)
+        if (libriscv_brk_handler) {
+            libriscv_brk_handler(m);
+            return;
+        }
+        // Fallback if no built-in handler saved
         uint64_t heap_addr = m.memory.heap_address();
         constexpr uint64_t BRK_MAX = 16ULL << 20;
         if (new_end > heap_addr + BRK_MAX) {
@@ -3038,9 +3000,10 @@ inline void install_syscalls(Machine& machine, vfs::VirtualFS& fs) {
     machine.install_syscall_handler(nr::clone, sys_clone);
     machine.install_syscall_handler(nr::execve, sys_execve);
     machine.install_syscall_handler(nr::wait4, sys_wait4);
-    // brk: override to handle post-execve memory layout changes
+    // brk: save built-in handler, then override for post-execve memory layout
+    libriscv_brk_handler = Machine::syscall_handlers[nr::brk];
     machine.install_syscall_handler(nr::brk, sys_brk);
-    // mmap: override to handle file-backed mappings via VFS + custom bump allocator
+    // mmap: save built-in handler, then override for file-backed mappings + custom bump allocator
     libriscv_mmap_handler = Machine::syscall_handlers[nr::mmap];
     machine.install_syscall_handler(nr::mmap, sys_mmap);
     // mprotect: override for thread stacks + RELRO safety

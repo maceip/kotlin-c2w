@@ -556,6 +556,9 @@ Java_com_example_c2wdemo_FriscyRuntime_nativeDestroy(JNIEnv* env, jclass clazz) 
     syscalls::g_sched = {};
     syscalls::g_fork = {};
     syscalls::g_next_pid = 100;
+    syscalls::g_mmap_bump = 0;
+    syscalls::libriscv_mmap_handler = nullptr;
+    syscalls::libriscv_brk_handler = nullptr;
     syscalls::net_is_socket_fd = nullptr;
     syscalls::net_get_native_fd = nullptr;
 
