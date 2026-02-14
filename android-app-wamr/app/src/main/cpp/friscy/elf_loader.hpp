@@ -250,12 +250,23 @@ inline std::vector<std::pair<uint64_t, uint64_t>> build_auxv(
 ) {
     std::vector<std::pair<uint64_t, uint64_t>> auxv;
 
-    // Program headers of the main executable
+    // IMPORTANT: Entries with value=0 MUST come first.
+    // Some Go runtime versions walk the flat auxv as a NULL-terminated pointer
+    // array (word by word, not pairs). A value of 0 stops that walk, and
+    // sysauxv then processes entries AFTER the stop point. By putting zero-value
+    // entries first, critical entries like AT_PAGESZ are visible to sysauxv.
+    auxv.push_back({AT_UID,  0});
+    auxv.push_back({AT_EUID, 0});
+    auxv.push_back({AT_GID,  0});
+    auxv.push_back({AT_EGID, 0});
+    auxv.push_back({AT_SECURE, 0});
+
+    // Program headers of main executable
     auxv.push_back({AT_PHDR,  exec_info.phdr_addr});
     auxv.push_back({AT_PHENT, exec_info.phdr_size});
     auxv.push_back({AT_PHNUM, exec_info.phdr_count});
 
-    // Page size
+    // Page size (critical for Go runtime)
     auxv.push_back({AT_PAGESZ, 4096});
 
     // Interpreter base address (only if dynamic)
@@ -268,20 +279,11 @@ inline std::vector<std::pair<uint64_t, uint64_t>> build_auxv(
     // Entry point of the main executable (not interpreter)
     auxv.push_back({AT_ENTRY, exec_info.entry_point});
 
-    // User/group IDs
-    auxv.push_back({AT_UID,  0});
-    auxv.push_back({AT_EUID, 0});
-    auxv.push_back({AT_GID,  0});
-    auxv.push_back({AT_EGID, 0});
+    // Hardware capabilities (IMAFDC)
+    auxv.push_back({AT_HWCAP, RISCV_HWCAP_IMAFDC});
 
     // Clock ticks per second
     auxv.push_back({AT_CLKTCK, 100});
-
-    // Security mode (not secure)
-    auxv.push_back({AT_SECURE, 0});
-
-    // Hardware capabilities (IMAFDC)
-    auxv.push_back({AT_HWCAP, RISCV_HWCAP_IMAFDC});
 
     // Random bytes for stack canary, etc.
     auxv.push_back({AT_RANDOM, random_addr});

@@ -66,6 +66,47 @@ struct ForkState {
 inline ForkState g_fork = {};
 inline pid_t g_next_pid = 100;
 
+// Terminal (tty) state — stored per-fd for stdin/stdout/stderr.
+// Makes isatty(0) return true, enables raw mode for interactive shells.
+struct TermiosState {
+    uint32_t c_iflag = 0x0500;  // ICRNL | IXON
+    uint32_t c_oflag = 0x0005;  // OPOST | ONLCR
+    uint32_t c_cflag = 0x00bf;  // CS8 | CREAD | CLOCAL
+    uint32_t c_lflag = 0x8a3b;  // ECHO|ICANON|ISIG|IEXTEN|ECHOCTL|ECHOKE|ECHOE
+    uint8_t  c_line  = 0;
+    uint8_t  c_cc[19] = {};     // control characters
+    uint32_t c_ispeed = 38400;
+    uint32_t c_ospeed = 38400;
+
+    bool is_raw() const {
+        return (c_lflag & 0x0002) == 0;  // ICANON = 0x0002
+    }
+
+    void serialize(uint8_t buf[44]) const {
+        std::memcpy(buf + 0,  &c_iflag, 4);
+        std::memcpy(buf + 4,  &c_oflag, 4);
+        std::memcpy(buf + 8,  &c_cflag, 4);
+        std::memcpy(buf + 12, &c_lflag, 4);
+        buf[16] = c_line;
+        std::memcpy(buf + 17, c_cc, 19);
+        std::memcpy(buf + 36, &c_ispeed, 4);
+        std::memcpy(buf + 40, &c_ospeed, 4);
+    }
+
+    void deserialize(const uint8_t buf[44]) {
+        std::memcpy(&c_iflag, buf + 0,  4);
+        std::memcpy(&c_oflag, buf + 4,  4);
+        std::memcpy(&c_cflag, buf + 8,  4);
+        std::memcpy(&c_lflag, buf + 12, 4);
+        c_line = buf[16];
+        std::memcpy(c_cc, buf + 17, 19);
+        std::memcpy(&c_ispeed, buf + 36, 4);
+        std::memcpy(&c_ospeed, buf + 40, 4);
+    }
+};
+inline TermiosState g_termios;
+inline std::set<int> g_tty_fds = {0, 1, 2};
+
 // Cooperative thread scheduler for CLONE_THREAD.
 struct VThread {
     uint64_t regs[32];
@@ -1516,15 +1557,69 @@ static void sys_mmap(Machine& m) {
     int vfd = m.template sysarg<int>(4);
 
     if (vfd == -1) {
-        // Anonymous mapping: forward to libriscv's built-in handler.
-        // Our custom bump allocator only works with encompassing arena mode,
-        // but we use RISCV_FLAT_RW_ARENA without RISCV_ENCOMPASSING_ARENA,
-        // so libriscv's built-in mmap_allocate is the correct path.
-        if (libriscv_mmap_handler) {
-            libriscv_mmap_handler(m);
-        } else {
-            m.set_result(uint64_t(-12));  // -ENOMEM
+        // Anonymous mapping: custom bump allocator (synced from standalone).
+        // Bypass libriscv's mmap handler for V8/Go compatibility.
+        auto addr_g = m.sysarg(0);
+        auto length = m.sysarg(1);
+        auto prot   = m.template sysarg<int>(2);
+        auto flags  = m.template sysarg<int>(3);
+        constexpr int MAP_FIXED = 0x10;
+
+        if (length == 0) {
+            m.set_result(uint64_t(-22));  // -EINVAL
+            return;
         }
+        constexpr uint64_t ARENA_LIMIT = (1ULL << riscv::encompassing_Nbit_arena);
+
+        // Single bump pointer synced with mmap_address()
+        static uint64_t our_bump = 0;
+        uint64_t cur_mmap_addr = m.memory.mmap_address();
+        if (our_bump == 0 || our_bump < cur_mmap_addr) {
+            our_bump = cur_mmap_addr;
+        }
+
+        uint64_t aligned_len = (length + 4095) & ~4095ULL;
+        uint64_t result;
+
+        if (flags & MAP_FIXED) {
+            if (addr_g + aligned_len > ARENA_LIMIT) {
+                m.set_result(uint64_t(-12));  // -ENOMEM
+                return;
+            }
+            result = addr_g;
+        } else if (addr_g != 0 && addr_g >= ARENA_LIMIT && aligned_len >= (32ULL << 20)) {
+            // Large hint beyond arena: ENOMEM (Go compatibility)
+            m.set_result(uint64_t(-12));
+            return;
+        } else {
+            // No hint or small hint: bump allocate (V8 compatibility)
+            if (our_bump + aligned_len > ARENA_LIMIT) {
+                m.set_result(uint64_t(-12));  // -ENOMEM
+                return;
+            }
+            result = our_bump;
+            our_bump += aligned_len;
+        }
+
+        if (our_bump > m.memory.mmap_address()) {
+            m.memory.mmap_address() = our_bump;
+        }
+
+        // Zero-fill anonymous pages
+        if (!(flags & MAP_FIXED)) {
+            if constexpr (riscv::encompassing_Nbit_arena != 0) {
+                auto* arena = (uint8_t*)m.memory.memory_arena_ptr();
+                if (arena && result + aligned_len <= m.memory.memory_arena_size()) {
+                    std::memset(arena + result, 0, aligned_len);
+                } else {
+                    m.memory.memset(result, 0, aligned_len);
+                }
+            } else {
+                m.memory.memset(result, 0, aligned_len);
+            }
+        }
+
+        m.set_result(result);
         maybe_preempt(m);
         return;
     }
@@ -1730,7 +1825,7 @@ static void sys_ioctl(Machine& m) {
     // Return terminal dimensions for stdin/stdout/stderr so that programs
     // can query the terminal size (e.g. for ncurses, ls column formatting).
     if (request == 0x5413) {
-        if (fd >= 0 && fd <= 2) {
+        if (g_tty_fds.count(fd)) {
             auto ws_addr = m.sysarg(2);
             struct { uint16_t rows, cols, xpixel, ypixel; } ws = { 24, 80, 0, 0 };
             ws.rows = static_cast<uint16_t>(android_io::term_rows.load());
@@ -1741,34 +1836,25 @@ static void sys_ioctl(Machine& m) {
         }
     }
 
-    // TCGETS - get terminal attributes
-    // Succeed for fd 0, 1, 2 so isatty() returns true for all stdio.
-    // This enables interactive shell features: line editing, colored
-    // prompts, tab completion, job control.
+    // TCGETS - get terminal attributes (using TermiosState)
     if (request == 0x5401) {
-        if (fd >= 0 && fd <= 2) {
+        if (g_tty_fds.count(fd)) {
             auto termios_addr = m.sysarg(2);
-            // struct termios on RISC-V Linux is 44 bytes:
-            //   c_iflag(4) + c_oflag(4) + c_cflag(4) + c_lflag(4)
-            //   + c_line(1) + c_cc[19] + c_ispeed(4) + c_ospeed(4)
             uint8_t termios_buf[44] = {};
-            uint32_t c_iflag = 0;
-            uint32_t c_oflag = 0x0005;  // OPOST | ONLCR
-            uint32_t c_cflag = 0x00bf;  // CS8 | CREAD | CLOCAL
-            uint32_t c_lflag = 0x8a3b;  // ECHO|ICANON|ISIG|IEXTEN|ECHOCTL|ECHOKE|ECHOE
-            std::memcpy(termios_buf + 0, &c_iflag, 4);
-            std::memcpy(termios_buf + 4, &c_oflag, 4);
-            std::memcpy(termios_buf + 8, &c_cflag, 4);
-            std::memcpy(termios_buf + 12, &c_lflag, 4);
+            g_termios.serialize(termios_buf);
             m.memory.memcpy(termios_addr, termios_buf, sizeof(termios_buf));
             m.set_result(0);
             return;
         }
     }
 
-    // TCSETS, TCSETSW, TCSETSF - set terminal attributes (accept silently)
+    // TCSETS, TCSETSW, TCSETSF - set terminal attributes (store in TermiosState)
     if (request == 0x5402 || request == 0x5403 || request == 0x5404) {
-        if (fd >= 0 && fd <= 2) {
+        if (g_tty_fds.count(fd)) {
+            auto termios_addr = m.sysarg(2);
+            uint8_t termios_buf[44] = {};
+            m.memory.memcpy_out(termios_buf, termios_addr, sizeof(termios_buf));
+            g_termios.deserialize(termios_buf);
             m.set_result(0);
             return;
         }
@@ -2393,22 +2479,40 @@ static void sys_futex(Machine& m) {
             int next = g_sched.next_runnable(g_sched.current);
             if (next >= 0) {
                 static int switch_count = 0;
-                if (++switch_count <= 20)
+                if (++switch_count <= 50)
                     fprintf(stderr, "[futex] WAIT switch t%d->t%d addr=0x%lx exp=0x%x\n",
                             g_sched.current, next, (long)uaddr, (unsigned)expected);
                 switch_to_thread(m, next);
                 return;
             }
+            // All threads waiting — cooperative deadlock. Force-wake a sleeping
+            // thread so it can observe any shutdown signals written to memory.
+            for (int i = 0; i < MAX_VTHREADS; i++) {
+                if (i != g_sched.current && g_sched.threads[i].active && g_sched.threads[i].waiting) {
+                    g_sched.threads[i].waiting = false;
+                    static int deadlock_count = 0;
+                    if (++deadlock_count <= 50)
+                        fprintf(stderr, "[futex] deadlock-break: force-wake t%d, switch from t%d\n",
+                                i, g_sched.current);
+                    switch_to_thread(m, i);
+                    return;
+                }
+            }
+            // Truly no other threads — fall through
             cur.waiting = false;
         }
 
-        // Fallback: no cooperative threads. Write 0 to break spin loops.
-        m.memory.template write<int32_t>(uaddr, 0);
+        // Fallback: no cooperative threads (all exited).
         static int futex_wait_count = 0;
-        if (++futex_wait_count <= 20) {
-            fprintf(stderr, "[futex] WAIT fallback addr=0x%lx exp=0x%x\n",
-                    (long)uaddr, (unsigned)expected);
+        if (++futex_wait_count <= 50) {
+            fprintf(stderr, "[futex] WAIT fallback addr=0x%lx exp=0x%x actual=0x%x count=%d\n",
+                    (long)uaddr, (unsigned)expected, (unsigned)actual, g_sched.count);
         }
+        if (g_sched.count <= 1) {
+            m.set_result(-11);  // -EAGAIN
+            return;
+        }
+        m.memory.template write<int32_t>(uaddr, 0);
         m.set_result(0);
 
     } else if (cmd == FUTEX_WAKE || cmd == FUTEX_WAKE_BITSET) {
@@ -2591,7 +2695,35 @@ static void sys_madvise(Machine& m) {
     m.set_result(0);
 }
 static void sys_prctl(Machine& m) { m.set_result(0); }
-static void sys_mremap(Machine& m) { m.set_result(err::NOSYS); }
+static void sys_mremap(Machine& m) {
+    auto old_addr = m.sysarg(0);
+    auto old_size = m.sysarg(1);
+
+    // Validate address is within the arena (synced from standalone).
+    // EFAULT for out-of-arena prevents musl infinite loop on corrupted chunks.
+    constexpr uint64_t ARENA_LIMIT = (1ULL << riscv::encompassing_Nbit_arena);
+    if (old_addr >= ARENA_LIMIT || old_addr + old_size > ARENA_LIMIT) {
+        m.set_result(uint64_t(-14));  // -EFAULT
+        return;
+    }
+    // Valid addresses: ENOMEM forces musl fallback to mmap+memcpy+munmap.
+    m.set_result(uint64_t(-12));  // -ENOMEM
+}
+static void sys_munmap(Machine& m) {
+    auto addr = m.sysarg(0);
+    auto len  = m.sysarg(1);
+    uint64_t aligned_len = (len + 4095) & ~4095ULL;
+
+    // Zero the region to prevent stale data
+    if constexpr (riscv::encompassing_Nbit_arena != 0) {
+        auto* arena = (uint8_t*)m.memory.memory_arena_ptr();
+        if (arena && addr + aligned_len <= m.memory.memory_arena_size()) {
+            std::memset(arena + addr, 0, aligned_len);
+        }
+    }
+    m.set_result(0);
+}
+
 static void sys_eventfd2(Machine& m) {
     auto& fs = get_fs(m);
     auto entry = std::make_shared<vfs::Entry>();
@@ -3054,6 +3186,7 @@ inline void install_syscalls(Machine& machine, vfs::VirtualFS& fs) {
     // Stubs
     machine.install_syscall_handler(nr::madvise, sys_madvise);
     machine.install_syscall_handler(nr::prctl, sys_prctl);
+    machine.install_syscall_handler(nr::munmap, sys_munmap);
     machine.install_syscall_handler(nr::mremap, sys_mremap);
     machine.install_syscall_handler(nr::eventfd2, sys_eventfd2);
     machine.install_syscall_handler(nr::io_uring_setup, sys_io_uring_setup);
