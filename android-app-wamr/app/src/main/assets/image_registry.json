@@ -1,46 +1,36 @@
 {
-  "version": 1,
+  "version": 2,
   "images": [
     {
       "id": "alpine-base",
       "name": "Alpine Linux",
-      "description": "Alpine 3.20 with bash, curl, vim",
+      "description": "Alpine 3.20 with BusyBox shell",
       "icon": "terminal",
       "accentColor": "#00FF88",
       "bundledAsset": "rootfs.tar",
-      "downloadUrl": "https://github.com/maceip/kotlin-c2w/releases/download/images-v1/alpine-base.tar",
       "entryPoint": "/bin/sh",
       "sizeBytes": 7451136
     },
     {
-      "id": "gemini-cli",
-      "name": "Gemini CLI",
-      "description": "Google Gemini AI in your terminal",
-      "icon": "sparkle",
-      "accentColor": "#4285F4",
-      "downloadUrl": "https://github.com/maceip/kotlin-c2w/releases/download/images-v1/gemini-cli.tar",
-      "entryPoint": "/usr/local/bin/start-gemini",
-      "sizeBytes": 0
-    },
-    {
-      "id": "codex-cli",
-      "name": "Codex CLI",
-      "description": "OpenAI Codex coding assistant",
+      "id": "node-alpine",
+      "name": "Node.js",
+      "description": "Node.js v24 on Alpine (riscv64, --jitless)",
       "icon": "code",
-      "accentColor": "#10A37F",
-      "downloadUrl": "https://github.com/maceip/kotlin-c2w/releases/download/images-v1/codex-cli.tar",
-      "entryPoint": "/usr/local/bin/start-codex",
-      "sizeBytes": 0
+      "accentColor": "#339933",
+      "downloadUrl": "https://github.com/maceip/kotlin-c2w/releases/download/images-v1/node-rootfs.tar",
+      "entryPoint": "/usr/bin/node",
+      "sizeBytes": 85983232
     },
     {
       "id": "claude-code",
       "name": "Claude Code",
-      "description": "Anthropic Claude coding agent",
+      "description": "Anthropic Claude coding agent (Node.js + V8 snapshot)",
       "icon": "brain",
       "accentColor": "#D97757",
       "downloadUrl": "https://github.com/maceip/kotlin-c2w/releases/download/images-v1/claude-code.tar",
-      "entryPoint": "/usr/local/bin/start-claude",
-      "sizeBytes": 0
+      "entryPoint": "/usr/bin/node",
+      "entryArgs": ["--snapshot-blob=/root/claude-snapshot.blob", "--", "--version"],
+      "sizeBytes": 120586240
     }
   ]
 }
