@@ -30,6 +30,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <memory>
+#include <unordered_map>
 
 #include <libriscv/machine.hpp>
 
@@ -46,8 +47,8 @@
 
 using Machine = riscv::Machine<riscv::RISCV64>;
 
-// Maximum instructions per simulate() call (16 billion — effectively unlimited)
-static constexpr uint64_t MAX_INSTRUCTIONS = 16'000'000'000ULL;
+// Maximum instructions per simulate() call (512 billion — matches standalone)
+static constexpr uint64_t MAX_INSTRUCTIONS = 512'000'000'000ULL;
 
 // Syscall bases for libriscv native heap/memory management
 static constexpr uint32_t HEAP_SYSCALLS_BASE = 480;
@@ -118,6 +119,12 @@ static void execution_loop() {
             for (int retries = 0; retries < 8; retries++) {
                 try {
                     g_machine->simulate(MAX_INSTRUCTIONS);
+                    // execve: machine.stop() signals new binary loaded
+                    if (syscalls::g_execve_restart) {
+                        syscalls::g_execve_restart = false;
+                        retries = -1;  // reset for new binary
+                        continue;
+                    }
                     break;
                 } catch (const riscv::MachineException& e) {
                     uint64_t fault_addr = e.data();
@@ -213,6 +220,71 @@ static std::vector<uint8_t> read_vfs_file(vfs::VirtualFS& fs, const std::string&
 }
 
 // ============================================================================
+// Virtual /proc and /dev files (synced from friscy-standalone)
+// ============================================================================
+
+static void setup_virtual_files(vfs::VirtualFS& vfs) {
+    // /dev/null
+    vfs.add_virtual_file("/dev/null", std::vector<uint8_t>{});
+
+    // /dev/tty and /dev/console — controlling terminal
+    vfs.add_virtual_file("/dev/tty", std::vector<uint8_t>{});
+    vfs.add_virtual_file("/dev/console", std::vector<uint8_t>{});
+    vfs.add_virtual_file("/dev/pts/0", std::vector<uint8_t>{});
+    vfs.add_virtual_file("/dev/ptmx", std::vector<uint8_t>{});
+
+    // /dev/urandom (reads handled by getrandom syscall)
+    vfs.add_virtual_file("/dev/urandom", std::vector<uint8_t>{});
+    vfs.add_virtual_file("/dev/random", std::vector<uint8_t>{});
+
+    // /etc/passwd, /etc/group (minimal)
+    vfs.add_virtual_file("/etc/passwd", "root:x:0:0:root:/root:/bin/sh\n");
+    vfs.add_virtual_file("/etc/group", "root:x:0:\n");
+
+    // /etc/hosts, /etc/resolv.conf
+    vfs.add_virtual_file("/etc/hosts", "127.0.0.1 localhost\n");
+    vfs.add_virtual_file("/etc/resolv.conf", "nameserver 8.8.8.8\n");
+
+    // Timezone data — needed by Node.js (abseil/cctz) to avoid abort()
+    static const uint8_t utc_tzif[] = {
+        // TZif v1 header
+        'T','Z','i','f','2',  0,0,0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+        0,0,0,0,  0,0,0,0,  0,0,0,0,  0,0,0,0,
+        0,0,0,1,  0,0,0,4,
+        0,0,0,0, 0, 0,  'U','T','C',0,
+        // TZif v2 header
+        'T','Z','i','f','2',  0,0,0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+        0,0,0,0,  0,0,0,0,  0,0,0,0,  0,0,0,0,
+        0,0,0,1,  0,0,0,4,
+        0,0,0,0, 0, 0,  'U','T','C',0,
+        '\n','U','T','C','0','\n',
+    };
+    std::vector<uint8_t> utc_tz(utc_tzif, utc_tzif + sizeof(utc_tzif));
+    vfs.add_virtual_file("/etc/localtime", utc_tz);
+    vfs.add_virtual_file("/usr/share/zoneinfo/UTC", utc_tz);
+    vfs.add_virtual_file("/usr/share/zoneinfo/Etc/UTC", utc_tz);
+
+    // /proc — needed by V8/Node.js
+    vfs.add_virtual_file("/proc/version_signature",
+        "Linux version 6.8.0 (friscy@libriscv) (riscv64-linux-gnu-gcc)\n");
+    vfs.add_virtual_file("/proc/cpuinfo",
+        "processor\t: 0\n"
+        "hart\t\t: 0\n"
+        "isa\t\t: rv64imafdc_zicsr_zifencei\n"
+        "mmu\t\t: sv39\n"
+        "uarch\t\t: friscy,libriscv\n"
+        "\n");
+    vfs.add_virtual_file("/proc/self/maps", "");
+    vfs.add_virtual_file("/proc/sys/vm/overcommit_memory", "0\n");
+
+    // /tmp directory and NODE_COMPILE_CACHE directory
+    vfs.mkdir("/tmp", 0777);
+    vfs.mkdir("/tmp/node-compile-cache", 0777);
+}
+
+// ============================================================================
 // JNI Functions
 // ============================================================================
 
@@ -278,6 +350,10 @@ Java_com_example_c2wdemo_FriscyRuntime_nativeLoadRootfs(
         g_vfs = std::make_unique<vfs::VirtualFS>();
         g_vfs->load_tar(reinterpret_cast<const uint8_t*>(tar_data), tar_len);
         env->ReleaseByteArrayElements(tarBytes, tar_data, JNI_ABORT);
+
+        // Setup virtual /proc, /dev, /etc files (synced from standalone)
+        setup_virtual_files(*g_vfs);
+        g_vfs->add_virtual_file("/proc/self/exe", entry_path);
 
         LOGI("VFS loaded, resolving entry: %s", entry_path.c_str());
 
@@ -363,6 +439,16 @@ Java_com_example_c2wdemo_FriscyRuntime_nativeLoadRootfs(
                 syscalls::g_exec_ctx.exec_rw_end = exec_base + rw_hi;
             }
 
+            // Advance mmap past interpreter to prevent overlap (from standalone)
+            auto [interp_lo, interp_hi] = elf::get_load_range(interp_binary);
+            uint64_t interp_end_page = (interp_base + interp_hi + 0xFFF) & ~0xFFFULL;
+            if (g_machine->memory.mmap_address() < interp_end_page) {
+                LOGI("Advancing mmap past interpreter: 0x%lx -> 0x%lx",
+                     (unsigned long)g_machine->memory.mmap_address(),
+                     (unsigned long)interp_end_page);
+                g_machine->memory.mmap_address() = interp_end_page;
+            }
+
             // Jump to interpreter instead of main binary
             g_machine->cpu.jump(interp_entry);
             LOGI("Interpreter entry: 0x%lx", (unsigned long)interp_entry);
@@ -413,7 +499,7 @@ Java_com_example_c2wdemo_FriscyRuntime_nativeLoadRootfs(
         syscalls::g_fork = {};
         syscalls::g_next_pid = 100;
 
-        // Environment variables
+        // Environment variables (synced from standalone)
         std::vector<std::string> guest_env = {
             "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             "HOME=/root",
@@ -421,6 +507,9 @@ Java_com_example_c2wdemo_FriscyRuntime_nativeLoadRootfs(
             "TERM=xterm-256color",
             "LANG=C.UTF-8",
             "HOSTNAME=friscy",
+            "TZ=UTC",
+            "NODE_OPTIONS=--jitless --max-old-space-size=256",
+            "NODE_COMPILE_CACHE=/tmp/node-compile-cache",
         };
         syscalls::g_exec_ctx.env = guest_env;
 
@@ -444,10 +533,46 @@ Java_com_example_c2wdemo_FriscyRuntime_nativeLoadRootfs(
         // Route stdout/stderr to Java callback
         g_machine->set_printer(friscy_printer);
 
-        // Log unhandled syscalls (don't crash)
+        // Log unhandled syscalls with name lookup (synced from standalone)
         Machine::on_unhandled_syscall =
-            [](Machine& m, size_t syscall_number) {
-                LOGI("Unhandled syscall: %zu", syscall_number);
+            [](Machine& m, size_t nr) {
+                static const std::unordered_map<size_t, const char*> names = {
+                    {17,"getcwd"},{19,"eventfd2"},{20,"epoll_create1"},{21,"epoll_ctl"},
+                    {22,"epoll_pwait"},{23,"dup"},{24,"dup3"},{25,"fcntl"},{29,"ioctl"},
+                    {32,"flock"},{34,"mkdirat"},{35,"unlinkat"},{36,"symlinkat"},
+                    {37,"linkat"},{38,"renameat"},{46,"ftruncate"},{48,"faccessat"},
+                    {49,"chdir"},{52,"fchmod"},{53,"fchmodat"},{54,"fchownat"},
+                    {55,"fchown"},{56,"openat"},{57,"close"},{59,"pipe2"},
+                    {61,"getdents64"},{62,"lseek"},{63,"read"},{64,"write"},
+                    {65,"readv"},{66,"writev"},{67,"pread64"},{68,"pwrite64"},
+                    {70,"pwritev"},{71,"sendfile"},{73,"ppoll"},{78,"readlinkat"},
+                    {79,"newfstatat"},{80,"fstat"},{82,"fsync"},{90,"capget"},
+                    {93,"exit"},{94,"exit_group"},{96,"set_tid_address"},
+                    {98,"futex"},{99,"set_robust_list"},{101,"nanosleep"},
+                    {113,"clock_gettime"},{114,"clock_getres"},{120,"sched_getscheduler"},
+                    {121,"sched_getparam"},{123,"sched_getaffinity"},{124,"sched_yield"},
+                    {129,"kill"},{130,"tkill"},{131,"tgkill"},{132,"sigaltstack"},
+                    {134,"sigaction"},{135,"sigprocmask"},{139,"rt_sigreturn"},
+                    {148,"getresuid"},{150,"getresgid"},{155,"getpgid"},
+                    {158,"getgroups"},{160,"uname"},{166,"umask"},{167,"prctl"},
+                    {172,"getpid"},{173,"getppid"},{174,"getuid"},{175,"geteuid"},
+                    {176,"getgid"},{177,"getegid"},{178,"gettid"},{179,"sysinfo"},
+                    {198,"socket"},{199,"socketpair"},{200,"bind"},{201,"listen"},
+                    {202,"accept"},{203,"connect"},{204,"getsockname"},
+                    {205,"getpeername"},{206,"sendto"},{207,"recvfrom"},
+                    {208,"setsockopt"},{209,"getsockopt"},{210,"shutdown"},
+                    {211,"sendmsg"},{212,"recvmsg"},{214,"brk"},{215,"munmap"},
+                    {216,"mremap"},{220,"clone"},{221,"execve"},{222,"mmap"},
+                    {226,"mprotect"},{233,"madvise"},{260,"wait4"},{261,"prlimit64"},
+                    {278,"getrandom"},{283,"membarrier"},{291,"statx"},
+                    {293,"rseq"},{425,"io_uring_setup"},{439,"faccessat2"},
+                };
+                auto it = names.find(nr);
+                const char* name = it != names.end() ? it->second : "???";
+                LOGI("Unhandled syscall: #%zu (%s) a0=%lu a1=%lu",
+                     nr, name,
+                     (unsigned long)m.cpu.reg(10),
+                     (unsigned long)m.cpu.reg(11));
                 m.set_result(-38);  // ENOSYS
             };
 
@@ -557,6 +682,7 @@ Java_com_example_c2wdemo_FriscyRuntime_nativeDestroy(JNIEnv* env, jclass clazz) 
     syscalls::g_fork = {};
     syscalls::g_next_pid = 100;
     syscalls::g_mmap_bump = 0;
+    syscalls::g_execve_restart = false;
     syscalls::libriscv_mmap_handler = nullptr;
     syscalls::libriscv_brk_handler = nullptr;
     syscalls::net_is_socket_fd = nullptr;

@@ -28,6 +28,9 @@ using Machine = riscv::Machine<riscv::RISCV64>;
 inline bool (*net_is_socket_fd)(int fd) = nullptr;
 inline int  (*net_get_native_fd)(int fd) = nullptr;  // returns native fd or -1
 
+// Execve restart flag — set by sys_execve handler, checked by execution loop
+inline bool g_execve_restart = false;
+
 // Cooperative fork state — single-process vfork emulation.
 // On clone(): save parent registers, return 0 (child runs).
 // On exit_group() in child: restore parent registers, return child PID.
