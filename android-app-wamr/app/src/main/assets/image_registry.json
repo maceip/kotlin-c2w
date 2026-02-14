@@ -14,12 +14,12 @@
     {
       "id": "node-alpine",
       "name": "Node.js",
-      "description": "Node.js v24 on Alpine (riscv64, --jitless)",
+      "description": "Node.js v20 on Alpine 3.20 (riscv64, --jitless)",
       "icon": "code",
       "accentColor": "#339933",
-      "downloadUrl": "https://github.com/maceip/kotlin-c2w/releases/download/images-v1/node-rootfs.tar",
+      "downloadUrl": "https://github.com/maceip/kotlin-c2w/releases/download/v0.8.0-sync/node-rootfs.tar",
       "entryPoint": "/usr/bin/node",
-      "sizeBytes": 85983232
+      "sizeBytes": 68564992
     },
     {
       "id": "claude-code",
@@ -27,10 +27,10 @@
       "description": "Anthropic Claude coding agent (Node.js + V8 snapshot)",
       "icon": "brain",
       "accentColor": "#D97757",
-      "downloadUrl": "https://github.com/maceip/kotlin-c2w/releases/download/images-v1/claude-code.tar",
+      "downloadUrl": "https://github.com/maceip/kotlin-c2w/releases/download/v0.8.0-sync/claude-code-rootfs.tar",
       "entryPoint": "/usr/bin/node",
-      "entryArgs": ["--snapshot-blob=/root/claude-snapshot.blob", "--", "--version"],
-      "sizeBytes": 120586240
+      "entryArgs": ["--jitless", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.mjs", "--version"],
+      "sizeBytes": 147958272
     }
   ]
 }
