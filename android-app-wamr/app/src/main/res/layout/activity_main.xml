@@ -158,12 +158,26 @@
                     android:id="@+id/btnUp"
                     android:layout_width="0dp"
                     android:layout_height="36dp"
+                    android:layout_marginEnd="4dp"
                     android:layout_weight="1"
                     android:background="@drawable/zim_key_bg"
                     android:fontFamily="monospace"
                     android:gravity="center"
                     android:text="&#9650;"
                     android:textColor="#00FFFF"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/btnSnap"
+                    android:layout_width="0dp"
+                    android:layout_height="36dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/zim_key_bg"
+                    android:fontFamily="monospace"
+                    android:gravity="center"
+                    android:text="SNAP"
+                    android:textColor="#C77DFF"
                     android:textSize="12sp"
                     android:textStyle="bold" />
 

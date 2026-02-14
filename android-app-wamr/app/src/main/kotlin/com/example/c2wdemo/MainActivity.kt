@@ -10,6 +10,8 @@ import android.view.View
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.ComposeView
@@ -19,6 +21,7 @@ import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 import com.example.c2wdemo.gauge.GaugeData
 import com.example.c2wdemo.gauge.StatRail
 import com.example.c2wdemo.gauge.SystemStatsProvider
@@ -42,6 +45,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statsProvider: SystemStatsProvider
     private val gaugeState = mutableStateOf(GaugeData())
     private var backSpineHandler: BackSpineHandler? = null
+    private lateinit var snapshotManager: SnapshotManager
+    private lateinit var btnSnap: TextView
 
     /** The bridge connecting friscy runtime to the Termux TerminalEmulator. */
     private lateinit var bridge: FriscyTerminalBridge
@@ -111,6 +116,9 @@ class MainActivity : AppCompatActivity() {
             override fun onPasteRequest() {}
         })
         terminalView.bridge = bridge
+
+        btnSnap = findViewById(R.id.btnSnap)
+        snapshotManager = SnapshotManager(this)
 
         setupImeAnimation()
         setupZimHelperBar()
@@ -231,6 +239,49 @@ class MainActivity : AppCompatActivity() {
             statsProvider.onInputEvent()
             terminalView.sendInput("\u001B[A")
         }
+
+        // SNAP: tap to save, long-press to restore
+        btnSnap.setOnClickListener {
+            lifecycleScope.launch {
+                val ok = snapshotManager.save()
+                runOnUiThread {
+                    Toast.makeText(
+                        this@MainActivity,
+                        if (ok) "Snapshot saved" else "Snapshot failed",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        }
+        btnSnap.setOnLongClickListener {
+            showSnapshotDialog()
+            true
+        }
+    }
+
+    private fun showSnapshotDialog() {
+        val snapshots = snapshotManager.list()
+        if (snapshots.isEmpty()) {
+            Toast.makeText(this, "No snapshots", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val names = snapshots.map { it.name + " (${it.sizeBytes / 1024 / 1024}MB)" }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Restore snapshot")
+            .setItems(names) { _, which ->
+                lifecycleScope.launch {
+                    val ok = snapshotManager.restore(snapshots[which].name)
+                    runOnUiThread {
+                        Toast.makeText(
+                            this@MainActivity,
+                            if (ok) "Restored: ${snapshots[which].name}" else "Restore failed",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun setupStatusGauge() {
